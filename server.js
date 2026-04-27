@@ -96,28 +96,46 @@ const BEAUTY_WORDS=['skin','face','beauty','hair','eye','lip','mask','serum','cr
 async function getCJProduct(cjt,keyword,log){
   const L=log;
   try{
-    const r=await fetch(`https://developers.cjdropshipping.com/api2.0/v1/product/list?productNameEn=${encodeURIComponent(keyword)}&pageNum=1&pageSize=10`,{headers:{'CJ-Access-Token':cjt}});
-    const d=await r.json();
-    const list=d.data?.list||[];
-    if(!list.length){return null;}
-    const relevant=list.filter(p=>{
-      const name=(p.productNameEn||p.productName||'').toLowerCase();
-      return BEAUTY_WORDS.some(k=>name.includes(k));
-    });
+    // 2 Seiten abrufen = bis zu 20 Produkte fuer mehr Auswahl
+    const [r1,r2]=await Promise.all([1,2].map(page=>
+      fetch(`https://developers.cjdropshipping.com/api2.0/v1/product/list?productNameEn=${encodeURIComponent(keyword)}&pageNum=${page}&pageSize=10`,{headers:{'CJ-Access-Token':cjt}})
+        .then(r=>r.json()).then(d=>d.data?.list||[]).catch(()=>[])
+    ));
+    const list=[...r1,...r2];
+    if(!list.length){L(`CJ "${keyword}": keine Ergebnisse`,'warn');return null;}
+
+    // Beauty-relevante bevorzugen
+    const relevant=list.filter(p=>BEAUTY_WORDS.some(k=>(p.productNameEn||p.productName||'').toLowerCase().includes(k)));
     const pool=relevant.length>0?relevant:list;
+
+    // Score — Bild gibt grossen Bonus, aber wir iterieren trotzdem
     const scored=pool.map(p=>{
       const name=(p.productNameEn||'').toLowerCase();
-      const hasImg=p.productImage&&p.productImage.startsWith('https://')?30:0;
+      const hasImg=p.productImage&&p.productImage.startsWith('https://')?50:0;
       const kwMatch=keyword.split(' ').filter(w=>w.length>2&&name.includes(w.toLowerCase())).length*10;
       const isBeauty=BEAUTY_WORDS.some(k=>name.includes(k))?15:0;
-      return{...p,_score:hasImg+kwMatch+isBeauty};
+      return{...p,_score:hasImg+kwMatch+isBeauty,_hasImg:!!(p.productImage&&p.productImage.startsWith('https://'))};
     }).sort((a,b)=>b._score-a._score);
-    const best=scored[0];
-    if(!best)return null;
-    const ek=parseFloat(best.sellPrice?.split(' -- ')[0]||best.sellPrice||0);
-    L(`CJ "${keyword}": "${(best.productNameEn||'').substring(0,40)}" | Bild:${best.productImage?'✓':'✗'}`,'ok');
-    return{cjId:best.pid,image:best.productImage||'',ek:ek||null};
-  }catch(e){return null;}
+
+    // Gehe durch Liste bis Produkt MIT Bild gefunden
+    let chosen=null;
+    for(let i=0;i<scored.length;i++){
+      if(scored[i]._hasImg){
+        chosen=scored[i];
+        if(i>0)L(`CJ "${keyword}": Produkt #${i+1} hat Bild (erste ${i} hatten keins) — "${(chosen.productNameEn||'').substring(0,35)}"`,'ok');
+        else L(`CJ "${keyword}": "${(chosen.productNameEn||'').substring(0,40)}" hat Bild ✓`,'ok');
+        break;
+      }
+    }
+
+    if(!chosen){
+      L(`CJ "${keyword}": Keines der ${scored.length} Produkte hat ein Bild — uebersprungen`,'warn');
+      return null;
+    }
+
+    const ek=parseFloat(chosen.sellPrice?.split(' -- ')[0]||chosen.sellPrice||0);
+    return{cjId:chosen.pid,image:chosen.productImage,ek:ek||null};
+  }catch(e){L('CJ Fehler: '+e.message,'err');return null;}
 }
 
 async function generateContent(productName,trend){
@@ -272,6 +290,14 @@ app.post('/api/agent/run',async(req,res)=>{
 
       // CJ Suche
       const cj=await getCJProduct(cjt,product.cjKeyword||product.name.split(' ').slice(0,2).join(' '),L);
+
+      // Strikt: Nur Produkte MIT Bild werden publiziert
+      if(!cj?.image||!cj.image.startsWith('https://')){
+        L(`⚠ ÜBERSPRUNGEN (kein Bild): "${product.name}" — CJ hat kein Produktbild gefunden`,'warn');
+        skipped.push({name:product.name,reason:'Kein Produktbild bei CJDropshipping gefunden'});
+        continue;
+      }
+
       const ek=cj?.ek||product.ek;
       const pricing=calcPrice(ek,product);
       L(`Preis: $${ek.toFixed(2)} EK → $${pricing.vk} VK (${pricing.margin}% Marge)`,'info');
