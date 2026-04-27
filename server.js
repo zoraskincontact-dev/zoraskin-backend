@@ -36,7 +36,6 @@ async function getShopifyToken() {
   const d = await r.json();
   shopifyToken = d.access_token;
   shopifyTokenExpiry = Date.now() + (d.expires_in || 86399) * 1000;
-  console.log('Shopify Token erneuert');
   return shopifyToken;
 }
 
@@ -55,7 +54,7 @@ async function getCJToken() {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ZoraSkin Backend v2.0 läuft', shopify: !!CONFIG.SHOPIFY_CLIENT_ID, cj: !!CONFIG.CJ_EMAIL, claude: !!CONFIG.CLAUDE_KEY });
+  res.json({ status: 'ZoraSkin Backend v2.0', shopify: !!CONFIG.SHOPIFY_CLIENT_ID, cj: !!CONFIG.CJ_EMAIL, claude: !!CONFIG.CLAUDE_KEY });
 });
 
 app.get('/api/test', async (req, res) => {
@@ -82,7 +81,7 @@ app.post('/api/shopify/product', async (req, res) => {
     const body = {
       product: {
         title: product.name,
-        body_html: `<p><em>${product.hook || ''}</em></p><p>${product.usp || ''}</p><p>Rating: ${product.rating}/5</p>`,
+        body_html: `<p><em>${product.hook || ''}</em></p><p>${product.usp || ''}</p>`,
         vendor: 'ZoraSkin', product_type: 'Beauty',
         tags: (product.tags || []).join(','), status: 'active',
         variants: [{ price: product.vk.toString(), compare_at_price: (product.vk * 1.3).toFixed(2), requires_shipping: true, inventory_quantity: 999 }]
@@ -104,25 +103,16 @@ app.post('/api/agent/run', async (req, res) => {
   const { category = 'Beauty', limit = 10, minRating = 4.5, minOrders = 100, priceMulti = 2.5 } = req.body;
   const log = [];
   const L = (msg, type = 'sys') => { log.push({ time: new Date().toISOString(), msg, type }); console.log(msg); };
-
   try {
     L('Agent gestartet', 'info');
     const shopToken = await getShopifyToken();
     L('Shopify verbunden', 'ok');
     const cjt = await getCJToken();
     L('CJDropshipping verbunden', 'ok');
-
-    const cjr = await fetch(
-      `https://developers.cjdropshipping.com/api2.0/v1/product/list?categoryName=${encodeURIComponent(category)}&pageNum=1&pageSize=${limit}`,
-      { headers: { 'CJ-Access-Token': cjt } }
-    );
+    const cjr = await fetch(`https://developers.cjdropshipping.com/api2.0/v1/product/list?categoryName=${encodeURIComponent(category)}&pageNum=1&pageSize=${limit}`, { headers: { 'CJ-Access-Token': cjt } });
     const cjd = await cjr.json();
-    let products = (cjd.data?.list || [])
-      .filter(p => parseFloat(p.productEval || 5) >= minRating)
-      .filter(p => parseInt(p.salesVolume || 0) >= minOrders)
-      .sort((a, b) => parseFloat(b.productEval) - parseFloat(a.productEval));
+    let products = (cjd.data?.list || []).filter(p => parseFloat(p.productEval || 5) >= minRating).filter(p => parseInt(p.salesVolume || 0) >= minOrders).sort((a, b) => parseFloat(b.productEval) - parseFloat(a.productEval));
     L(`${products.length} Produkte gefunden`, 'ok');
-
     const enriched = [];
     for (const p of products) {
       const ek = parseFloat(p.sellPrice) || 10;
@@ -130,11 +120,7 @@ app.post('/api/agent/run', async (req, res) => {
       let hook = p.productNameEn || p.productName, usp = '';
       if (CONFIG.CLAUDE_KEY) {
         try {
-          const ar = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': CONFIG.CLAUDE_KEY, 'anthropic-version': '2023-06-01' },
-            body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 150, messages: [{ role: 'user', content: `Short hook (10 words) and USP (15 words) for: "${p.productNameEn || p.productName}". JSON only: {"hook":"...","usp":"..."}` }] })
-          });
+          const ar = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': CONFIG.CLAUDE_KEY, 'anthropic-version': '2023-06-01' }, body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 150, messages: [{ role: 'user', content: `Hook (10 words) and USP (15 words) for: "${p.productNameEn || p.productName}". JSON only: {"hook":"...","usp":"..."}` }] }) });
           const ad = await ar.json();
           const parsed = JSON.parse(ad.content[0].text.replace(/```json|```/g, '').trim());
           hook = parsed.hook; usp = parsed.usp;
@@ -143,20 +129,14 @@ app.post('/api/agent/run', async (req, res) => {
       enriched.push({ name: p.productNameEn || p.productName, ek, vk, rating: parseFloat(p.productEval) || 4.5, orders: parseInt(p.salesVolume) || 0, image: p.productImage, cjId: p.pid, hook, usp, tags: [category, 'Beauty'] });
     }
     L('Texte generiert', 'ok');
-
     let published = 0;
     for (const product of enriched) {
       try {
-        const sr = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/2025-01/products.json`, {
-          method: 'POST',
-          headers: { 'X-Shopify-Access-Token': shopToken, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ product: { title: product.name, body_html: `<p><em>${product.hook}</em></p><p>${product.usp}</p>`, vendor: 'ZoraSkin', product_type: 'Beauty', tags: product.tags.join(','), status: 'active', variants: [{ price: product.vk.toString(), compare_at_price: (product.vk * 1.3).toFixed(2), requires_shipping: true, inventory_quantity: 999 }], images: product.image ? [{ src: product.image }] : [] } })
-        });
+        const sr = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/2025-01/products.json`, { method: 'POST', headers: { 'X-Shopify-Access-Token': shopToken, 'Content-Type': 'application/json' }, body: JSON.stringify({ product: { title: product.name, body_html: `<p><em>${product.hook}</em></p><p>${product.usp}</p>`, vendor: 'ZoraSkin', product_type: 'Beauty', tags: product.tags.join(','), status: 'active', variants: [{ price: product.vk.toString(), compare_at_price: (product.vk * 1.3).toFixed(2), requires_shipping: true, inventory_quantity: 999 }], images: product.image ? [{ src: product.image }] : [] } }) });
         if (sr.ok) { published++; L(`Publiziert: ${product.name}`, 'ok'); }
         else { const err = await sr.json(); L(`Fehler: ${JSON.stringify(err)}`, 'err'); }
       } catch (e) { L('Fehler: ' + e.message, 'err'); }
     }
-
     L(`Fertig: ${published}/${enriched.length} in Shopify`, 'ok');
     res.json({ success: true, published, total: enriched.length, log });
   } catch (e) {
