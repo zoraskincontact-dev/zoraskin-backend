@@ -1090,20 +1090,69 @@ app.get('/api/shopify/collections', async (req, res) => {
 });
 
 app.post('/api/trends/analyze', async (req, res) => {
-  const { customKeywords = [], count = 15, useTikTok = true, tiktokCountry = 'US', tiktokPeriod = '30' } = req.body;
+  const {
+    customKeywords = [],
+    count = 15,
+    useTikTok = true,
+    tiktokCountry = 'US',
+    tiktokCountries,  // Optional Array — überschreibt single country
+    tiktokPeriod = '30'
+  } = req.body;
   const serverLog = [];
   const L = (msg, type='sys') => { serverLog.push({msg, type}); console.log('['+type+'] '+msg); };
+
+  // Country-Liste normalisieren
+  const countryList = (Array.isArray(tiktokCountries) && tiktokCountries.length > 0)
+    ? tiktokCountries
+    : [tiktokCountry];
+
   try {
     L('━━━ Phase 1: Trend-Analyse ━━━', 'info');
     let tiktokTrends = [];
     if (useTikTok && CONFIG.APIFY_TOKEN) {
-      L(`TikTok Discovery: Beauty-Hashtags ${tiktokCountry} ${tiktokPeriod}d`, 'info');
-      tiktokTrends = await discoverTikTokTrends({ country: tiktokCountry, period: tiktokPeriod, maxResults: 30 }, L);
+      L(`TikTok Discovery für ${countryList.length} Land/Länder: ${countryList.join(', ')} · ${tiktokPeriod}d`, 'info');
+
+      // Discovery PARALLEL pro Land — schneller als sequenziell
+      const results = await Promise.all(
+        countryList.map(c => discoverTikTokTrends({
+          country: c, period: tiktokPeriod, maxResults: 30
+        }, L).catch(err => {
+          L(`Country ${c} fehlgeschlagen: ${err.message}`, 'warn');
+          return [];
+        }))
+      );
+
+      // Merge mit Tracking welcher Hashtag in welchen Ländern auftaucht
+      const hashtagMap = new Map();  // hashtag -> { ...data, countries: [...] }
+      results.forEach((countryResults, idx) => {
+        const country = countryList[idx];
+        countryResults.forEach(t => {
+          const key = t.hashtag.toLowerCase();
+          if (hashtagMap.has(key)) {
+            const existing = hashtagMap.get(key);
+            existing.countries.push(country);
+            existing.crossCountryRank = (existing.crossCountryRank || 0) + (Math.max(0, 100 - (t.rank || 50)));
+            // Höchsten Wert behalten
+            existing.videoCount = Math.max(existing.videoCount || 0, t.videoCount || 0);
+            existing.views = Math.max(existing.views || 0, t.views || 0);
+          } else {
+            hashtagMap.set(key, { ...t, countries: [country], crossCountryRank: Math.max(0, 100 - (t.rank || 50)) });
+          }
+        });
+      });
+
+      tiktokTrends = Array.from(hashtagMap.values()).sort((a, b) => {
+        // Cross-Country Trends zuerst, dann nach Reichweite
+        if (a.countries.length !== b.countries.length) return b.countries.length - a.countries.length;
+        return (b.views || 0) - (a.views || 0);
+      });
+
       if (tiktokTrends.length > 0) {
         const newOnly = tiktokTrends.filter(t => t.isNew).length;
         const upOnly = tiktokTrends.filter(t => t.trendDirection === 'up').length;
-        L(`✓ ${tiktokTrends.length} TikTok-Hashtags · NEU: ${newOnly} · Aufsteigend: ${upOnly}`, 'ok');
-        L(`Top 5: ${tiktokTrends.slice(0,5).map(t => '#' + t.hashtag).join(', ')}`, 'info');
+        const crossCountry = tiktokTrends.filter(t => t.countries.length > 1).length;
+        L(`✓ ${tiktokTrends.length} unique Hashtags · NEU: ${newOnly} · Aufsteigend: ${upOnly} · Cross-Country: ${crossCountry}`, 'ok');
+        L(`Top 5: ${tiktokTrends.slice(0,5).map(t => `#${t.hashtag}(${t.countries.join('+')})`).join(', ')}`, 'info');
       }
     }
     L('Sonnet 4.6 strukturiert Trends...', 'info');
@@ -1121,6 +1170,8 @@ app.post('/api/trends/analyze', async (req, res) => {
               videoCount: match.videoCount, views: match.views,
               rankChange: match.rankChange, country: match.country,
               isNew: match.isNew, trendDirection: match.trendDirection,
+              countries: match.countries || [match.country],  // alle Länder wo der Trend lebt
+              crossCountry: (match.countries || []).length > 1,
             };
             matchedCount++;
           }
@@ -1128,7 +1179,12 @@ app.post('/api/trends/analyze', async (req, res) => {
       });
       L(`${matchedCount} Trends mit TikTok-Live-Daten verknüpft`, 'ok');
     }
-    res.json({ success: true, ...analysis, tiktokTrendsCount: tiktokTrends.length, serverLog });
+    res.json({
+      success: true, ...analysis,
+      tiktokTrendsCount: tiktokTrends.length,
+      tiktokCountriesQueried: countryList,
+      serverLog
+    });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message, serverLog });
   }
