@@ -1,5 +1,5 @@
-// ZoraSkin Backend v8.2 — Maximale CJ V2-API-Ausnutzung
-// Trending-Filter, Kategorie-Filter, Reviews, Smart Scoring, Image-Sanity-Check
+// ZoraSkin Backend v8.3 — TikTok Apify-Integration + alles aus v8.2
+// NEU: Apify TikTok Discovery (Phase 1) + Apify Hashtag-Lookup (Phase 2, parallel zu CJ)
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
@@ -16,14 +16,19 @@ const CONFIG = {
   SHOPIFY_CLIENT_ID: process.env.SHOPIFY_CLIENT_ID || '',
   SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || '',
   CLAUDE_KEY: process.env.CLAUDE_KEY || '',
+  APIFY_TOKEN: process.env.APIFY_TOKEN || '',
   CLAUDE_MODEL_TRENDS: 'claude-sonnet-4-6',
   CLAUDE_MODEL_COPY: 'claude-haiku-4-5-20251001',
   CLAUDE_MODEL_VISION: 'claude-haiku-4-5-20251001',
   SHOPIFY_API_VERSION: '2026-01',
   ENABLE_IMAGE_SANITY_CHECK: process.env.ENABLE_IMAGE_SANITY_CHECK === 'true',
+  // Apify Actor-IDs (Format: username~actor-name)
+  APIFY_DISCOVERY_ACTOR: 'data_xplorer~tiktok-trends',
+  APIFY_LOOKUP_ACTOR: 'parseforge~tiktok-hashtag-analytics-scraper',
 };
 
 const CJ_BASE = 'https://developers.cjdropshipping.com/api2.0/v1';
+const APIFY_BASE = 'https://api.apify.com/v2';
 
 let shopifyToken = '', shopifyTokenExpiry = 0;
 let cjToken = '', cjTokenExpiry = 0;
@@ -63,6 +68,116 @@ async function getCJToken() {
   return cjToken;
 }
 
+// ============= APIFY HELPER =============
+// Synchron-Endpoint: POST run-sync-get-dataset-items
+// Default Timeout 5 Min, kann via timeout query param erhöht werden
+async function runApifyActor(actorId, input, options = {}) {
+  if (!CONFIG.APIFY_TOKEN) throw new Error('APIFY_TOKEN fehlt');
+  const timeoutSec = options.timeoutSec || 300;  // 5 Min default
+  const url = `${APIFY_BASE}/acts/${actorId}/run-sync-get-dataset-items?token=${CONFIG.APIFY_TOKEN}&timeout=${timeoutSec}`;
+
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input || {}),
+    timeout: (timeoutSec + 30) * 1000,  // node-fetch timeout etwas länger als Apify
+  });
+
+  if (!r.ok) {
+    const errText = await r.text();
+    throw new Error(`Apify ${actorId} ${r.status}: ${errText.slice(0,300)}`);
+  }
+  // run-sync-get-dataset-items liefert direkt das Array
+  const data = await r.json();
+  return Array.isArray(data) ? data : [];
+}
+
+// ============= APIFY: TIKTOK DISCOVERY =============
+// Sucht aktuell trending Beauty-Hashtags auf TikTok Creative Center
+async function discoverTikTokTrends(options = {}, log = () => {}) {
+  const { country = 'US', period = '30', maxResults = 50 } = options;
+
+  if (!CONFIG.APIFY_TOKEN) {
+    log('Apify-Token fehlt, TikTok-Discovery übersprungen', 'warn');
+    return [];
+  }
+
+  log(`TikTok Discovery: Beauty-Hashtags ${country} letzte ${period} Tage`, 'info');
+
+  // data_xplorer/tiktok-trends Input-Schema
+  const input = {
+    scrapeHashtags: true,
+    scrapeVideos: false,
+    scrapeCreators: false,
+    scrapeSongs: false,
+    hashtagCountries: [country],
+    hashtagIndustries: ['Beauty & Personal Care'],
+    hashtagPeriod: period,
+    hashtagMaxItems: maxResults,
+    hashtagNewOnly: false,
+  };
+
+  try {
+    const items = await runApifyActor(CONFIG.APIFY_DISCOVERY_ACTOR, input, { timeoutSec: 180 });
+    log(`✓ TikTok Discovery: ${items.length} Hashtags erhalten`, 'ok');
+
+    return items.map(item => ({
+      hashtag: item.hashtag_name || item.hashtagName || item.name || item.hashtag,
+      rank: item.rank,
+      industry: item.industry,
+      country: item.country || country,
+      videoCount: item.publishCnt || item.videoCount || item.video_count || 0,
+      views: item.videoViews || item.views || 0,
+      rankChange: item.rankChange || item.rank_change || 0,
+      trendType: item.trendType,
+      raw: item,
+    })).filter(t => t.hashtag);
+  } catch(e) {
+    log(`TikTok Discovery Fehler: ${e.message}`, 'err');
+    return [];
+  }
+}
+
+// ============= APIFY: TIKTOK HASHTAG-LOOKUP =============
+// Holt detaillierte Analytics für ein spezifisches Hashtag
+async function lookupHashtagAnalytics(hashtags, options = {}, log = () => {}) {
+  const { country = 'US' } = options;
+  if (!CONFIG.APIFY_TOKEN || !hashtags?.length) return [];
+
+  // Hashtags säubern: ohne #, lowercase, ohne Spaces
+  const cleanHashtags = hashtags.map(h => h.replace(/^#/, '').toLowerCase().replace(/\s+/g, ''));
+  log(`TikTok Lookup: ${cleanHashtags.length} Hashtags Detail-Analyse`, 'info');
+
+  const input = {
+    hashtags: cleanHashtags,
+    country: country,
+    mode: 'lookup',
+  };
+
+  try {
+    const items = await runApifyActor(CONFIG.APIFY_LOOKUP_ACTOR, input, { timeoutSec: 240 });
+    log(`✓ TikTok Lookup: ${items.length} Detailberichte`, 'ok');
+
+    return items.map(item => ({
+      hashtag: item.hashtag_name || item.hashtagName || item.name,
+      views7d: item.views7d || item.views_7d || 0,
+      viewsTotal: item.viewsTotal || item.views_total || item.views || 0,
+      videoCount: item.publishCnt || item.videoCount || 0,
+      audienceAges: item.audienceAges || item.audience_ages || [],
+      audienceInterests: item.audienceInterests || item.audience_interests || [],
+      topCountries: item.topCountries || item.top_countries || [],
+      relatedHashtags: item.relatedHashtags || item.related_hashtags || [],
+      topCreators: item.topCreators || item.top_creators || [],
+      topVideos: item.topVideos || item.top_videos || [],
+      trendChart: item.trendChart || item.trend_chart || [],
+      raw: item,
+    }));
+  } catch(e) {
+    log(`TikTok Lookup Fehler: ${e.message}`, 'err');
+    return [];
+  }
+}
+
 // ============= BEAUTY-KATEGORIEN AUTO-DISCOVERY =============
 const BEAUTY_CATEGORY_KEYWORDS = [
   'beauty', 'skin', 'hair', 'cosmetic', 'makeup', 'personal care',
@@ -79,7 +194,7 @@ async function loadBeautyCategoryIds(cjt, log = () => {}) {
     });
     const d = await r.json();
     if (!d.result || !d.data) {
-      log('Beauty-Kategorien konnten nicht geladen werden, Fallback auf Keyword-Filter', 'warn');
+      log('Beauty-Kategorien konnten nicht geladen werden', 'warn');
       beautyCategoryIds = [];
       return { ids: [], names: [] };
     }
@@ -89,15 +204,12 @@ async function loadBeautyCategoryIds(cjt, log = () => {}) {
     for (const lv1 of (d.data || [])) {
       const lv1Name = (lv1.categoryFirstName || '').toLowerCase();
       const lv1Beauty = BEAUTY_CATEGORY_KEYWORDS.some(kw => lv1Name.includes(kw));
-
       for (const lv2 of (lv1.categoryFirstList || [])) {
         const lv2Name = (lv2.categorySecondName || '').toLowerCase();
         const lv2Beauty = BEAUTY_CATEGORY_KEYWORDS.some(kw => lv2Name.includes(kw));
-
         for (const lv3 of (lv2.categorySecondList || [])) {
           const lv3Name = (lv3.categoryName || '').toLowerCase();
           const lv3Beauty = BEAUTY_CATEGORY_KEYWORDS.some(kw => lv3Name.includes(kw));
-
           if (lv1Beauty || lv2Beauty || lv3Beauty) {
             ids.push(lv3.categoryId);
             names.push(`${lv1.categoryFirstName} > ${lv2.categorySecondName} > ${lv3.categoryName}`);
@@ -105,7 +217,6 @@ async function loadBeautyCategoryIds(cjt, log = () => {}) {
         }
       }
     }
-
     beautyCategoryIds = ids;
     beautyCategoryNames = names;
     log(`✓ ${ids.length} Beauty-Kategorien aus CJ geladen`, 'ok');
@@ -117,7 +228,7 @@ async function loadBeautyCategoryIds(cjt, log = () => {}) {
   }
 }
 
-// ============= STRENGE BEAUTY-VALIDIERUNG =============
+// ============= BEAUTY-FILTER =============
 const BEAUTY_WORDS = ['skin','face','beauty','hair','eye','lip','mask','serum','cream','roller','gua','jade','light therapy','whitening','massager','scrubber','razor','vitamin','collagen','therapy','lift','pore','acne','tone','glow','bright','anti aging','wrinkle','moistur','sunscreen','retinol','peptide','hyaluronic','niacin','lash','brow','neck','scalp','dental','teeth','charcoal','exfoli','cleanser','toner','essence','lotion','mist','spray','patch','strip','sponge','blender','brush','eyelid','cellulite','contouring','derma','microcurrent','radiofrequency','infrared','spa','facial','wand','globe','ice','steamer','nose','blackhead','red light','led light'];
 const NON_BEAUTY = ['vacuum cleaner','car ','automotive','kitchen','food ','pet ','toy ','gaming','computer','phone case','cable','charger','tool','drill','bicycle','sport shoe','fishing','garden','furniture','mattress','curtain','laptop','tablet','headphone','keyboard','mouse pad','watch band','mobile phone','camera','speaker','audio','remote control'];
 
@@ -135,11 +246,8 @@ async function searchProductsV2(cjt, params) {
   const queryParams = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
     if (v === null || v === undefined || v === '') return;
-    if (Array.isArray(v)) {
-      v.forEach(item => queryParams.append(k, item));
-    } else {
-      queryParams.append(k, String(v));
-    }
+    if (Array.isArray(v)) v.forEach(item => queryParams.append(k, item));
+    else queryParams.append(k, String(v));
   });
 
   const url = `${CJ_BASE}/product/listV2?${queryParams.toString()}`;
@@ -149,9 +257,7 @@ async function searchProductsV2(cjt, params) {
     throw new Error(`CJ V2 Search ${r.status}: ${errText.slice(0,200)}`);
   }
   const d = await r.json();
-  if (!d.result) {
-    throw new Error(`CJ V2 Search Error: ${d.message || 'unknown'}`);
-  }
+  if (!d.result) throw new Error(`CJ V2 Search Error: ${d.message || 'unknown'}`);
 
   const products = [];
   for (const block of (d.data?.content || [])) {
@@ -201,75 +307,50 @@ async function searchProductsV1Fallback(cjt, keyword, page = 1) {
   }));
 }
 
-// ============= MULTI-STRATEGY SUCHE =============
 async function findCJProductsForTrend(cjt, trend, log = () => {}) {
   const beautyCats = beautyCategoryIds || [];
   const keyword = trend.cjKeyword;
-
   let result = null;
 
-  // Strategie 1: Strikt — Trending + Verified + Beauty + Free Shipping
   if (beautyCats.length > 0) {
     try {
       result = await searchProductsV2(cjt, {
-        keyWord: keyword,
-        page: 1,
-        size: 30,
+        keyWord: keyword, page: 1, size: 30,
         lv3categoryList: beautyCats,
-        verifiedWarehouse: 1,
-        addMarkStatus: 1,
-        productFlag: 0,
-        orderBy: 1,
-        sort: 'desc',
-        startWarehouseInventory: 50,
-        zonePlatform: 'shopify',
+        verifiedWarehouse: 1, addMarkStatus: 1,
+        productFlag: 0, orderBy: 1, sort: 'desc',
+        startWarehouseInventory: 50, zonePlatform: 'shopify',
         features: ['enable_category', 'enable_video'],
       });
-      if (result.products.length > 0) {
-        log(`  Strategie 1 (Trending+Verified+Beauty+FreeShip): ${result.products.length} Treffer`, 'info');
-      }
-    } catch(e) {
-      log(`  Strategie 1 fehlgeschlagen: ${e.message}`, 'warn');
-    }
+      if (result.products.length > 0) log(`  Strategie 1 (Trending+Verified+Beauty): ${result.products.length}`, 'info');
+    } catch(e) { log(`  Strategie 1 fehlgeschlagen: ${e.message}`, 'warn'); }
   }
 
-  // Strategie 2: Mittel — Beauty + Verified
   if (!result || result.products.length < 5) {
     try {
       const r2 = await searchProductsV2(cjt, {
-        keyWord: keyword,
-        page: 1,
-        size: 30,
+        keyWord: keyword, page: 1, size: 30,
         lv3categoryList: beautyCats.length > 0 ? beautyCats : undefined,
-        verifiedWarehouse: 1,
-        orderBy: 1,
-        sort: 'desc',
+        verifiedWarehouse: 1, orderBy: 1, sort: 'desc',
         features: ['enable_category'],
       });
       if (r2.products.length > 0) {
-        log(`  Strategie 2 (Verified+Beauty): ${r2.products.length} Treffer`, 'info');
+        log(`  Strategie 2 (Verified+Beauty): ${r2.products.length}`, 'info');
         result = result && result.products.length > 0
           ? { products: [...result.products, ...r2.products.filter(p => !result.products.some(x => x.pid === p.pid))] }
           : r2;
       }
-    } catch(e) {
-      log(`  Strategie 2 fehlgeschlagen: ${e.message}`, 'warn');
-    }
+    } catch(e) { log(`  Strategie 2 fehlgeschlagen: ${e.message}`, 'warn'); }
   }
 
-  // Strategie 3: Locker — nur keyword
   if (!result || result.products.length < 3) {
     try {
       const r3 = await searchProductsV2(cjt, {
-        keyWord: keyword,
-        page: 1,
-        size: 30,
-        orderBy: 1,
-        sort: 'desc',
-        features: ['enable_category'],
+        keyWord: keyword, page: 1, size: 30,
+        orderBy: 1, sort: 'desc', features: ['enable_category'],
       });
       if (r3.products.length > 0) {
-        log(`  Strategie 3 (nur Keyword): ${r3.products.length} Treffer`, 'info');
+        log(`  Strategie 3 (nur Keyword): ${r3.products.length}`, 'info');
         const filtered = r3.products.filter(p =>
           !containsNonBeauty(p.productNameEn) && containsBeautyWord(p.productNameEn)
         );
@@ -277,96 +358,46 @@ async function findCJProductsForTrend(cjt, trend, log = () => {}) {
           ? { products: [...result.products, ...filtered.filter(p => !result.products.some(x => x.pid === p.pid))] }
           : { products: filtered };
       }
-    } catch(e) {
-      log(`  Strategie 3 fehlgeschlagen: ${e.message}`, 'warn');
-    }
+    } catch(e) { log(`  Strategie 3 fehlgeschlagen: ${e.message}`, 'warn'); }
   }
 
-  // V1-Fallback
   if (!result || result.products.length === 0) {
     try {
       log(`  V1-Fallback wird versucht...`, 'warn');
       const v1 = await searchProductsV1Fallback(cjt, keyword, 1);
-      const filtered = v1.filter(p =>
-        !containsNonBeauty(p.productNameEn) && containsBeautyWord(p.productNameEn)
-      );
+      const filtered = v1.filter(p => !containsNonBeauty(p.productNameEn) && containsBeautyWord(p.productNameEn));
       result = { products: filtered };
-    } catch(e) {
-      log(`  V1-Fallback fehlgeschlagen: ${e.message}`, 'err');
-      return [];
-    }
+    } catch(e) { log(`  V1-Fallback fehlgeschlagen: ${e.message}`, 'err'); return []; }
   }
-
   return result?.products || [];
 }
 
-// ============= SMART SCORING =============
+// ============= SCORING =============
 function scoreProduct(p, trend) {
   let score = 0;
   const reasons = [];
-
   if (p.listedNum > 0) {
     const listScore = Math.min(30, Math.log10(p.listedNum + 1) * 10);
     score += listScore;
     reasons.push(`Listings:+${Math.round(listScore)}`);
   }
-
   if (p.productImage && p.productImage.startsWith('https://')) score += 10;
-
   if (beautyCategoryIds && beautyCategoryIds.includes(p.categoryId)) {
-    score += 15;
-    reasons.push('BeautyCat:+15');
+    score += 15; reasons.push('BeautyCat:+15');
   }
-
   const name = (p.productNameEn || '').toLowerCase();
   const kwWords = (trend.cjKeyword || '').toLowerCase().split(' ').filter(w => w.length > 2);
   const kwMatch = kwWords.filter(w => name.includes(w)).length;
-  if (kwMatch > 0) {
-    score += kwMatch * 8;
-    reasons.push(`KwMatch:+${kwMatch * 8}`);
-  }
-
+  if (kwMatch > 0) { score += kwMatch * 8; reasons.push(`KwMatch:+${kwMatch * 8}`); }
   const beautyHits = BEAUTY_WORDS.filter(w => name.includes(w)).length;
-  if (beautyHits > 0) {
-    score += Math.min(15, beautyHits * 3);
-    reasons.push(`BeautyKw:+${Math.min(15, beautyHits * 3)}`);
-  }
-
-  if (containsNonBeauty(name)) {
-    score -= 50;
-    reasons.push('NonBeauty:-50');
-  }
-
-  if (p.verifiedWarehouse === 1) {
-    score += 10;
-    reasons.push('Verified:+10');
-  }
-
-  if (p.warehouseInventoryNum > 100) {
-    score += 5;
-    reasons.push('Stock:+5');
-  }
-
-  if (p.addMarkStatus === 1) {
-    score += 5;
-    reasons.push('FreeShip:+5');
-  }
-
-  if (p.isVideo === 1 || (p.videoList && p.videoList.length > 0)) {
-    score += 5;
-    reasons.push('Video:+5');
-  }
-
-  if (p.hasCECertification === 1) {
-    score += 5;
-    reasons.push('CE:+5');
-  }
-
-  if (p.deliveryCycle && /^[1-5]/.test(p.deliveryCycle)) {
-    score += 5;
-    reasons.push('FastShip:+5');
-  }
-
+  if (beautyHits > 0) { score += Math.min(15, beautyHits * 3); reasons.push(`BeautyKw:+${Math.min(15, beautyHits * 3)}`); }
+  if (containsNonBeauty(name)) { score -= 50; reasons.push('NonBeauty:-50'); }
+  if (p.verifiedWarehouse === 1) { score += 10; reasons.push('Verified:+10'); }
+  if (p.warehouseInventoryNum > 100) { score += 5; reasons.push('Stock:+5'); }
+  if (p.addMarkStatus === 1) { score += 5; reasons.push('FreeShip:+5'); }
+  if (p.isVideo === 1 || (p.videoList && p.videoList.length > 0)) { score += 5; reasons.push('Video:+5'); }
+  if (p.hasCECertification === 1) { score += 5; reasons.push('CE:+5'); }
+  if (p.deliveryCycle && /^[1-5]/.test(p.deliveryCycle)) { score += 5; reasons.push('FastShip:+5'); }
   return { score: Math.round(score), reasons };
 }
 
@@ -379,22 +410,16 @@ async function getCJProductDetails(cjt, pid) {
     const d = await r.json();
     if (!d.result || !d.data) return null;
     const p = d.data;
-
     const images = [];
     const addImg = (img) => {
-      if (typeof img === 'string' && img.startsWith('https://') && !images.includes(img)) {
-        images.push(img);
-      }
+      if (typeof img === 'string' && img.startsWith('https://') && !images.includes(img)) images.push(img);
     };
-
     addImg(p.bigImage);
     addImg(p.productImage);
-
     if (p.productImageSet) {
       const set = typeof p.productImageSet === 'string' ? JSON.parse(p.productImageSet) : p.productImageSet;
       if (Array.isArray(set)) set.forEach(addImg);
     }
-
     if (Array.isArray(p.variants)) {
       p.variants.forEach(v => {
         addImg(v.variantImage);
@@ -404,7 +429,6 @@ async function getCJProductDetails(cjt, pid) {
         }
       });
     }
-
     return {
       pid: p.pid,
       name: p.productNameEn || p.productName,
@@ -418,19 +442,13 @@ async function getCJProductDetails(cjt, pid) {
       videoList: p.productVideo || [],
       hasVideo: (p.productVideo || []).length > 0,
       variants: (p.variants || []).slice(0, 5).map(v => ({
-        sku: v.variantSku,
-        name: v.variantNameEn,
-        price: v.variantSellPrice,
-        weight: v.variantWeight,
+        sku: v.variantSku, name: v.variantNameEn,
+        price: v.variantSellPrice, weight: v.variantWeight,
       })),
     };
-  } catch(e) {
-    console.error('CJ Detail Error:', e.message);
-    return null;
-  }
+  } catch(e) { return null; }
 }
 
-// ============= CJ REVIEWS =============
 async function getCJProductReviews(cjt, pid) {
   try {
     const r = await fetch(`${CJ_BASE}/product/productComments?pid=${pid}&pageSize=10`, {
@@ -439,28 +457,22 @@ async function getCJProductReviews(cjt, pid) {
     const d = await r.json();
     const list = d.data?.list || [];
     if (!list.length) return { count: 0, avgScore: null, topReviews: [] };
-
     const scores = list.map(r => parseInt(r.score, 10)).filter(s => !isNaN(s));
     const avg = scores.length ? (scores.reduce((a,b) => a+b, 0) / scores.length) : null;
-
     const top = list.slice(0, 3).map(r => ({
       score: parseInt(r.score, 10),
       text: (r.comment || '').slice(0, 200),
       country: r.countryCode,
       user: r.commentUser,
     }));
-
     return {
       count: parseInt(d.data?.total || list.length, 10),
       avgScore: avg ? Math.round(avg * 10) / 10 : null,
       topReviews: top,
     };
-  } catch(e) {
-    return { count: 0, avgScore: null, topReviews: [] };
-  }
+  } catch(e) { return { count: 0, avgScore: null, topReviews: [] }; }
 }
 
-// ============= CJ STOCK BY COUNTRY =============
 async function getCJStockByPid(cjt, pid) {
   try {
     const r = await fetch(`${CJ_BASE}/product/stock/getInventoryByPid?pid=${pid}`, {
@@ -474,9 +486,7 @@ async function getCJStockByPid(cjt, pid) {
       total: i.totalInventoryNum || 0,
       cjStock: i.cjInventoryNum || 0,
     }));
-  } catch(e) {
-    return [];
-  }
+  } catch(e) { return []; }
 }
 
 // ============= IMAGE-SANITY-CHECK =============
@@ -497,10 +507,8 @@ async function imageSanityCheck(imageUrl, productName, expectedCategory) {
           role: 'user',
           content: [
             { type: 'image', source: { type: 'url', url: imageUrl } },
-            {
-              type: 'text',
-              text: `Product name: "${productName}"\nExpected category: ${expectedCategory}\n\nDoes this image actually show the named beauty/skincare product? Reply ONLY with valid JSON: {"matches":true/false,"reason":"max 8 words"}`
-            }
+            { type: 'text',
+              text: `Product name: "${productName}"\nExpected category: ${expectedCategory}\n\nDoes this image actually show the named beauty/skincare product? Reply ONLY with valid JSON: {"matches":true/false,"reason":"max 8 words"}` }
           ]
         }]
       })
@@ -509,9 +517,7 @@ async function imageSanityCheck(imageUrl, productName, expectedCategory) {
     const text = d.content?.[0]?.text?.replace(/```json|```/g, '').trim() || '{}';
     const parsed = JSON.parse(text);
     return { ok: parsed.matches !== false, reason: parsed.reason || '' };
-  } catch(e) {
-    return { ok: true, error: e.message };
-  }
+  } catch(e) { return { ok: true, error: e.message }; }
 }
 
 // ============= PRICING + IMPORT-PREP =============
@@ -545,7 +551,7 @@ async function prepareProductForImport(cjt, cjProduct, trend, log = () => {}) {
   let sanityCheck = { ok: true, skipped: true };
   if (CONFIG.ENABLE_IMAGE_SANITY_CHECK && allImages.length > 0) {
     sanityCheck = await imageSanityCheck(allImages[0], details?.name || cjProduct.productNameEn, trend.category);
-    log(`  Image-Check "${(details?.name || '').slice(0,40)}": ${sanityCheck.ok ? '✓ passt' : '✗ ' + (sanityCheck.reason || 'Mismatch')}`, sanityCheck.ok ? 'info' : 'warn');
+    log(`  Image-Check "${(details?.name || '').slice(0,40)}": ${sanityCheck.ok ? '✓' : '✗ ' + (sanityCheck.reason || 'Mismatch')}`, sanityCheck.ok ? 'info' : 'warn');
   }
 
   const usStock = stock.find(s => s.country === 'US');
@@ -560,9 +566,7 @@ async function prepareProductForImport(cjt, cjProduct, trend, log = () => {}) {
     categoryName: details?.categoryName || cjProduct.categoryName,
     description: details?.description || '',
     ek: Math.round(ek * 100) / 100,
-    vk,
-    compareAt,
-    margin,
+    vk, compareAt, margin,
     profit: parseFloat((vk - ek).toFixed(2)),
     listedNum: cjProduct.listedNum || 0,
     deliveryCycle: cjProduct.deliveryCycle,
@@ -599,6 +603,8 @@ async function prepareProductForImport(cjt, cjProduct, trend, log = () => {}) {
       targetAudience: trend.targetAudience,
       relatedKeywords: trend.relatedKeywords,
       longTailKeywords: trend.longTailKeywords,
+      // TikTok-Live-Daten falls vorhanden
+      tiktokLive: trend.tiktokLive,
     }
   };
 }
@@ -615,12 +621,19 @@ async function getExistingTitles(shopToken) {
   return titles;
 }
 
-// ============= TREND-ANALYSE =============
-async function analyzeTrends(customKeywords = [], count = 15) {
+// ============= TREND-ANALYSE MIT TIKTOK-INPUT =============
+async function analyzeTrends(customKeywords = [], count = 15, tiktokTrends = []) {
   if (!CONFIG.CLAUDE_KEY) throw new Error('CLAUDE_KEY fehlt');
 
   const extra = customKeywords.length > 0
     ? `\n\nIMPORTANT: Also include trends matching these specific user keywords: ${customKeywords.join(', ')}`
+    : '';
+
+  // TikTok-Live-Daten als Input für Sonnet
+  const tiktokContext = tiktokTrends.length > 0
+    ? `\n\nLIVE TIKTOK DATA (April 2026, real Creative Center data):\nThe following Beauty hashtags are CURRENTLY trending on TikTok:\n${tiktokTrends.map((t, i) =>
+        `${i+1}. #${t.hashtag} — Rank ${t.rank}, ${t.videoCount?.toLocaleString() || '?'} videos, ${t.views?.toLocaleString() || '?'} views, rank change: ${t.rankChange || 0}`
+      ).join('\n')}\n\nIMPORTANT: Use these REAL hashtags as primary input. Match each hashtag to a product trend. Set the "tiktokHashtag" field to the matching hashtag name. Set "dataSource" to "tiktok_live" for trends backed by real TikTok data.`
     : '';
 
   const prompt = `You are a senior beauty market intelligence analyst with access to global ecommerce data, social listening tools, sales analytics, and search-volume data for April 2026.
@@ -629,11 +642,11 @@ Conduct a COMPREHENSIVE A-to-Z product trend analysis. Identify the TOP ${count}
 - Actively trending on TikTok, Instagram, YouTube Shorts, Amazon
 - Strong global sales (US, UK, DE, AU, CA primary markets)
 - Suitable for dropshipping (small, lightweight, profitable)
-- Price range $10-$100${extra}
+- Price range $10-$100${extra}${tiktokContext}
 
 For EACH trend, provide a complete intelligence report.
 
-Respond ONLY with valid JSON, no markdown, no code fences:
+Respond ONLY with valid JSON, no markdown:
 {
   "analysisDate": "April 2026",
   "totalMarketSize": "$X.X billion",
@@ -645,6 +658,8 @@ Respond ONLY with valid JSON, no markdown, no code fences:
       "name": "Product trend name",
       "category": "Skincare Tools",
       "cjKeyword": "2-3 word keyword",
+      "tiktokHashtag": "guasha",
+      "dataSource": "tiktok_live",
       "avgPrice": 35,
       "priceRange": {"min": 25, "max": 55},
       "monthlySearches": 450000,
@@ -674,15 +689,11 @@ Respond ONLY with valid JSON, no markdown, no code fences:
   ]
 }
 
-CRITICAL: cjKeyword 2-3 generic words. trendPhase: emerging|growing|peak|declining. competition: low|medium|high. seasonality: evergreen|winter|summer|holiday.`;
+CRITICAL: cjKeyword 2-3 generic words. dataSource: tiktok_live (if backed by TikTok hashtag) or estimated. trendPhase: emerging|growing|peak|declining. competition: low|medium|high. seasonality: evergreen|winter|summer|holiday. tiktokHashtag: only if matches a real hashtag from the live data above (without #).`;
 
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': CONFIG.CLAUDE_KEY,
-      'anthropic-version': '2023-06-01'
-    },
+    headers: { 'Content-Type': 'application/json', 'x-api-key': CONFIG.CLAUDE_KEY, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model: CONFIG.CLAUDE_MODEL_TRENDS,
       max_tokens: 16000,
@@ -701,7 +712,7 @@ CRITICAL: cjKeyword 2-3 generic words. trendPhase: emerging|growing|peak|declini
   } catch(e) {
     const repaired = repairTruncatedTrendJson(text);
     if (repaired) {
-      console.warn(`[trends] JSON truncated=${truncated}, repariert auf ${repaired.trends?.length || 0} Trends`);
+      console.warn(`[trends] JSON truncated=${truncated}, repariert auf ${repaired.trends?.length || 0}`);
       return repaired;
     }
     throw new Error(`Claude JSON parse error: ${e.message}. Truncated=${truncated}.`);
@@ -725,8 +736,7 @@ function repairTruncatedTrendJson(text) {
       else if (c === '}') { depth--; if (depth === 0) lastValidEnd = i; }
     }
     if (lastValidEnd < 0) return null;
-    const repaired = text.slice(0, lastValidEnd + 1) + '\n  ]\n}';
-    return JSON.parse(repaired);
+    return JSON.parse(text.slice(0, lastValidEnd + 1) + '\n  ]\n}');
   } catch(e) { return null; }
 }
 
@@ -738,11 +748,7 @@ async function generateContent(product) {
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': CONFIG.CLAUDE_KEY,
-        'anthropic-version': '2023-06-01'
-      },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CONFIG.CLAUDE_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: CONFIG.CLAUDE_MODEL_COPY,
         max_tokens: 600,
@@ -767,13 +773,14 @@ JSON only: {"hook":"emotional 10 word hook","usp":"unique benefit 15 words","des
   }
 }
 
-// ============= SHOPIFY PUBLISH =============
 async function publishProduct(shopToken, product, content) {
   const bullets = (content.bullets || []).map(b => `<li>${b}</li>`).join('');
   const reviewsHtml = product.reviews?.avgScore
-    ? `<p>⭐ <strong>${product.reviews.avgScore}/5</strong> · ${product.reviews.count} reviews</p>`
-    : '';
+    ? `<p>⭐ <strong>${product.reviews.avgScore}/5</strong> · ${product.reviews.count} reviews</p>` : '';
   const ceHtml = product.hasCECertification ? '<p>🏷️ <strong>CE Certified</strong></p>' : '';
+  const tiktokLiveHtml = product.trend.tiktokLive
+    ? `<p>📈 <strong>TikTok-verifizierter Trend:</strong> ${product.trend.tiktokLive.viewsTotal?.toLocaleString() || ''} total views, ${product.trend.tiktokLive.videoCount?.toLocaleString() || ''} videos</p>`
+    : '';
 
   const body = {
     product: {
@@ -783,17 +790,17 @@ async function publishProduct(shopToken, product, content) {
 ${bullets ? `<ul>${bullets}</ul>` : ''}
 ${reviewsHtml}
 ${ceHtml}
+${tiktokLiveHtml}
 <p>⭐ <strong>Trending on ${product.trend.viralPlatform}:</strong> ${product.trend.trendReason}</p>
 <p><em>🌍 Ships worldwide · ↩ 30-day returns · 🔒 Secure payment</em></p>`,
       vendor: 'ZoraSkin',
       product_type: product.trend.category || 'Beauty',
       tags: [
-        product.trend.category,
-        'Trending 2026',
-        product.trend.viralPlatform + ' Viral',
-        'ZoraSkin',
+        product.trend.category, 'Trending 2026',
+        product.trend.viralPlatform + ' Viral', 'ZoraSkin',
         product.hasCECertification ? 'CE Certified' : null,
         product.isVerifiedWarehouse ? 'Verified Stock' : null,
+        product.trend.tiktokLive ? 'TikTok Live Trend' : null,
         ...(product.trend.relatedKeywords || []).slice(0, 3)
       ].filter(Boolean).join(','),
       status: 'active',
@@ -804,9 +811,7 @@ ${ceHtml}
         inventory_management: 'shopify',
         inventory_quantity: 999
       }],
-      images: product.images
-        .filter(i => i && i.startsWith('https://'))
-        .map((src, i) => ({ src, alt: i === 0 ? product.name : `${product.name} ${i + 1}` }))
+      images: product.images.filter(i => i && i.startsWith('https://')).map((src, i) => ({ src, alt: i === 0 ? product.name : `${product.name} ${i + 1}` }))
     }
   };
 
@@ -825,16 +830,16 @@ ${ceHtml}
 
 // ============= ROUTES =============
 app.get('/', (req, res) => res.json({
-  status: 'ZoraSkin Backend v8.2',
+  status: 'ZoraSkin Backend v8.3 — TikTok Apify Integration',
   features: [
-    'CJ V2-API mit Elasticsearch',
-    'Multi-Strategy Suche (Trending → Verified → Locker → V1-Fallback)',
-    'Auto-Discovery Beauty-Kategorien',
-    'Echte CJ-Bewertungen + Lager-Daten pro Land',
-    'Smart Scoring mit listedNum + Verified-Status',
-    'Optional: Image-Sanity-Check via Vision-API',
+    'CJ V2-API mit Elasticsearch + Multi-Strategy',
+    'TikTok Discovery via Apify (echte Hashtags US/UK/DE)',
+    'TikTok Hashtag-Lookup für Demographics + Top-Videos',
+    'Sonnet 4.6 nutzt TikTok-Live-Daten als Input',
+    'Echte CJ-Bewertungen + Lager pro Land',
+    'Image-Sanity-Check via Vision-API'
   ],
-  endpoints: ['/api/test', '/api/categories', '/api/trends/analyze', '/api/products/search', '/api/products/import', '/api/shopify/products']
+  endpoints: ['/api/test', '/api/categories', '/api/tiktok/test', '/api/trends/analyze', '/api/products/search', '/api/products/import']
 }));
 
 app.get('/api/test', async (req, res) => {
@@ -843,20 +848,34 @@ app.get('/api/test', async (req, res) => {
   try {
     await getCJToken();
     r.cj = 'verbunden';
-    if (!beautyCategoryIds) {
-      await loadBeautyCategoryIds(cjToken);
-    }
+    if (!beautyCategoryIds) await loadBeautyCategoryIds(cjToken);
     r.beautyCategories = beautyCategoryIds?.length || 0;
   } catch(e) { r.cj = 'Fehler: ' + e.message; }
   r.claude = CONFIG.CLAUDE_KEY ? 'Key vorhanden' : 'Key fehlt';
+  r.apify = CONFIG.APIFY_TOKEN ? 'Token vorhanden' : 'Token fehlt';
   r.config = {
     shopifyDomain: CONFIG.SHOPIFY_DOMAIN || 'fehlt',
     apiVersion: CONFIG.SHOPIFY_API_VERSION,
     claudeModelTrends: CONFIG.CLAUDE_MODEL_TRENDS,
     claudeModelCopy: CONFIG.CLAUDE_MODEL_COPY,
     imageSanityCheck: CONFIG.ENABLE_IMAGE_SANITY_CHECK,
+    apifyDiscovery: CONFIG.APIFY_DISCOVERY_ACTOR,
+    apifyLookup: CONFIG.APIFY_LOOKUP_ACTOR,
   };
   res.json(r);
+});
+
+// Test-Endpoint speziell für TikTok — schnell prüfen ob Apify-Token + Actors funktionieren
+app.get('/api/tiktok/test', async (req, res) => {
+  const log = [];
+  const L = (msg, type='sys') => { log.push({msg, type}); console.log('['+type+'] '+msg); };
+  try {
+    L('TikTok Discovery Test: Top 10 Beauty US 30 Tage', 'info');
+    const trends = await discoverTikTokTrends({ country: 'US', period: '30', maxResults: 10 }, L);
+    res.json({ success: true, trendsFound: trends.length, sample: trends.slice(0, 5), log });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message, log });
+  }
 });
 
 app.get('/api/categories', async (req, res) => {
@@ -864,9 +883,7 @@ app.get('/api/categories', async (req, res) => {
     const cjt = await getCJToken();
     const { ids, names } = await loadBeautyCategoryIds(cjt);
     res.json({ count: ids.length, categories: names });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/shopify/products', async (req, res) => {
@@ -876,31 +893,79 @@ app.get('/api/shopify/products', async (req, res) => {
       headers: { 'X-Shopify-Access-Token': token }
     });
     const d = await r.json();
-    res.json({
-      success: true,
-      count: d.products?.length,
-      products: d.products?.map(p => ({
-        id: p.id, title: p.title, price: p.variants?.[0]?.price,
-        images: p.images?.length, status: p.status
-      }))
-    });
-  } catch(e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
+    res.json({ success: true, count: d.products?.length, products: d.products?.map(p => ({
+      id: p.id, title: p.title, price: p.variants?.[0]?.price,
+      images: p.images?.length, status: p.status
+    })) });
+  } catch(e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// PHASE 1: Trend-Analyse mit TikTok-Discovery
 app.post('/api/trends/analyze', async (req, res) => {
-  const { customKeywords = [], count = 15 } = req.body;
+  const { customKeywords = [], count = 15, useTikTok = true, tiktokCountry = 'US', tiktokPeriod = '30' } = req.body;
+  const serverLog = [];
+  const L = (msg, type='sys') => { serverLog.push({msg, type}); console.log('['+type+'] '+msg); };
+
   try {
-    const analysis = await analyzeTrends(customKeywords, count);
-    res.json({ success: true, ...analysis });
+    L('━━━ Phase 1: Trend-Analyse ━━━', 'info');
+
+    // Schritt 1: TikTok Discovery
+    let tiktokTrends = [];
+    if (useTikTok && CONFIG.APIFY_TOKEN) {
+      L(`TikTok Discovery: Beauty-Hashtags ${tiktokCountry} letzte ${tiktokPeriod}d`, 'info');
+      tiktokTrends = await discoverTikTokTrends({
+        country: tiktokCountry,
+        period: tiktokPeriod,
+        maxResults: 30
+      }, L);
+      if (tiktokTrends.length > 0) {
+        L(`✓ ${tiktokTrends.length} echte TikTok-Hashtags geladen`, 'ok');
+        L(`Top 5: ${tiktokTrends.slice(0,5).map(t => '#' + t.hashtag).join(', ')}`, 'info');
+      } else {
+        L('Keine TikTok-Daten (Sonnet arbeitet ohne Live-Daten)', 'warn');
+      }
+    } else if (useTikTok) {
+      L('Apify-Token fehlt, TikTok-Discovery übersprungen', 'warn');
+    }
+
+    // Schritt 2: Sonnet strukturiert (mit oder ohne TikTok-Daten)
+    L('Sonnet 4.6 strukturiert Trends...', 'info');
+    const analysis = await analyzeTrends(customKeywords, count, tiktokTrends);
+    L(`✓ ${(analysis.trends || []).length} Trend-Karten erstellt`, 'ok');
+
+    // Schritt 3: TikTok-Live-Stats den passenden Trends zuordnen
+    if (tiktokTrends.length > 0 && analysis.trends) {
+      let matchedCount = 0;
+      analysis.trends.forEach(t => {
+        if (t.tiktokHashtag) {
+          const match = tiktokTrends.find(tk =>
+            tk.hashtag.toLowerCase() === t.tiktokHashtag.toLowerCase().replace(/^#/, '')
+          );
+          if (match) {
+            t.tiktokLive = {
+              hashtag: match.hashtag,
+              rank: match.rank,
+              videoCount: match.videoCount,
+              views: match.views,
+              rankChange: match.rankChange,
+              country: match.country,
+            };
+            matchedCount++;
+          }
+        }
+      });
+      L(`${matchedCount} Trends mit TikTok-Live-Daten verknüpft`, 'ok');
+    }
+
+    res.json({ success: true, ...analysis, tiktokTrendsCount: tiktokTrends.length, serverLog });
   } catch(e) {
-    res.status(500).json({ success: false, error: e.message });
+    res.status(500).json({ success: false, error: e.message, serverLog });
   }
 });
 
+// PHASE 2: CJ-Suche + TikTok-Lookup parallel pro Trend
 app.post('/api/products/search', async (req, res) => {
-  const { confirmedTrends = [] } = req.body;
+  const { confirmedTrends = [], tiktokCountry = 'US', useTikTokLookup = true } = req.body;
   if (!confirmedTrends.length) return res.status(400).json({ error: 'Keine Trends bestätigt' });
 
   const log = [];
@@ -909,16 +974,46 @@ app.post('/api/products/search', async (req, res) => {
   try {
     const cjt = await getCJToken();
     L('CJDropshipping verbunden', 'ok');
-
     await loadBeautyCategoryIds(cjt, L);
 
     const shopToken = await getShopifyToken();
     const existingTitles = await getExistingTitles(shopToken);
     L(`${existingTitles.size} bestehende Produkte für Duplikat-Check geladen`, 'info');
 
+    // OPTIONAL: TikTok-Lookup für alle bestätigten Trends parallel
+    let tiktokDetails = {};
+    if (useTikTokLookup && CONFIG.APIFY_TOKEN) {
+      const hashtagsToLookup = confirmedTrends
+        .filter(t => t.tiktokHashtag)
+        .map(t => t.tiktokHashtag);
+
+      if (hashtagsToLookup.length > 0) {
+        L(`TikTok-Lookup: Demographics für ${hashtagsToLookup.length} Hashtags`, 'info');
+        try {
+          const details = await lookupHashtagAnalytics(hashtagsToLookup, { country: tiktokCountry }, L);
+          details.forEach(d => {
+            if (d.hashtag) tiktokDetails[d.hashtag.toLowerCase()] = d;
+          });
+          L(`✓ ${details.length} Detail-Berichte erhalten`, 'ok');
+        } catch(e) {
+          L(`TikTok-Lookup Fehler (CJ-Suche läuft trotzdem): ${e.message}`, 'warn');
+        }
+      }
+    }
+
+    // CJ-Suche pro Trend
     const trendResults = [];
     for (const trend of confirmedTrends) {
       L(`━━━ "${trend.name}" (Keyword: "${trend.cjKeyword}") ━━━`, 'info');
+
+      // TikTok-Lookup-Daten dem Trend zuordnen
+      if (trend.tiktokHashtag) {
+        const lookup = tiktokDetails[trend.tiktokHashtag.toLowerCase()];
+        if (lookup) {
+          trend.tiktokLookup = lookup;
+          L(`  TikTok-Detail: 7d ${lookup.views7d?.toLocaleString() || '?'} views, ${lookup.videoCount?.toLocaleString() || '?'} Videos`, 'info');
+        }
+      }
 
       const candidates = await findCJProductsForTrend(cjt, trend, L);
       if (!candidates.length) {
@@ -1008,4 +1103,4 @@ app.post('/api/products/import', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`ZoraSkin Backend v8.2 auf Port ${PORT}`));
+app.listen(PORT, () => console.log(`ZoraSkin Backend v8.3 auf Port ${PORT} (TikTok Apify aktiv)`));
