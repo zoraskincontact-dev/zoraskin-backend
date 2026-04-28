@@ -871,8 +871,45 @@ app.get('/api/tiktok/test', async (req, res) => {
   const L = (msg, type='sys') => { log.push({msg, type}); console.log('['+type+'] '+msg); };
   try {
     L('TikTok Discovery Test: Top 10 Beauty US 30 Tage', 'info');
-    const trends = await discoverTikTokTrends({ country: 'US', period: '30', maxResults: 10 }, L);
-    res.json({ success: true, trendsFound: trends.length, sample: trends.slice(0, 5), log });
+
+    // Direkter Apify-Call ohne Mapping → zeigt Raw-Felder
+    const input = {
+      scrapeHashtags: true,
+      scrapeVideos: false,
+      scrapeCreators: false,
+      scrapeSongs: false,
+      hashtagCountries: ['US'],
+      hashtagIndustries: ['Beauty & Personal Care'],
+      hashtagPeriod: '30',
+      hashtagMaxItems: 10,
+      hashtagNewOnly: false,
+    };
+    L(`Apify Input: ${JSON.stringify(input)}`, 'info');
+
+    const rawItems = await runApifyActor(CONFIG.APIFY_DISCOVERY_ACTOR, input, { timeoutSec: 120 });
+    L(`✓ Apify Raw Response: ${rawItems.length} Items erhalten`, 'ok');
+
+    let rawKeys = [];
+    let rawSample = null;
+    if (rawItems.length > 0) {
+      rawKeys = Object.keys(rawItems[0]);
+      rawSample = rawItems[0];
+      L(`Verfügbare Felder im 1. Item: ${rawKeys.join(', ')}`, 'info');
+    }
+
+    // Auch normales Mapping testen
+    const mapped = await discoverTikTokTrends({ country: 'US', period: '30', maxResults: 10 }, L);
+    L(`Mapping-Ergebnis: ${mapped.length} Hashtags nach Filter`, mapped.length > 0 ? 'ok' : 'warn');
+
+    res.json({
+      success: true,
+      rawCount: rawItems.length,
+      rawKeys,
+      rawSample,
+      mappedCount: mapped.length,
+      mappedSample: mapped.slice(0, 3),
+      log
+    });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message, log });
   }
