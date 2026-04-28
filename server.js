@@ -1,4 +1,5 @@
-// ZoraSkin Backend v8.1 — Erweiterte Trend-Analyse + Multi-Kandidaten + Bilder-Fix
+// ZoraSkin Backend v8.2 — Maximale CJ V2-API-Ausnutzung
+// Trending-Filter, Kategorie-Filter, Reviews, Smart Scoring, Image-Sanity-Check
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
@@ -15,16 +16,19 @@ const CONFIG = {
   SHOPIFY_CLIENT_ID: process.env.SHOPIFY_CLIENT_ID || '',
   SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || '',
   CLAUDE_KEY: process.env.CLAUDE_KEY || '',
-  // Aktualisierte Modelle (April 2026)
   CLAUDE_MODEL_TRENDS: 'claude-sonnet-4-6',
   CLAUDE_MODEL_COPY: 'claude-haiku-4-5-20251001',
-  // Aktuelle Shopify API-Version
+  CLAUDE_MODEL_VISION: 'claude-haiku-4-5-20251001',
   SHOPIFY_API_VERSION: '2026-01',
+  ENABLE_IMAGE_SANITY_CHECK: process.env.ENABLE_IMAGE_SANITY_CHECK === 'true',
 };
 
-// Token-Cache
+const CJ_BASE = 'https://developers.cjdropshipping.com/api2.0/v1';
+
 let shopifyToken = '', shopifyTokenExpiry = 0;
 let cjToken = '', cjTokenExpiry = 0;
+let beautyCategoryIds = null;
+let beautyCategoryNames = [];
 
 // ============= AUTH =============
 async function getShopifyToken() {
@@ -47,7 +51,7 @@ async function getShopifyToken() {
 
 async function getCJToken() {
   if (cjToken && Date.now() < cjTokenExpiry - 60000) return cjToken;
-  const r = await fetch('https://developers.cjdropshipping.com/api2.0/v1/authentication/getAccessToken', {
+  const r = await fetch(`${CJ_BASE}/authentication/getAccessToken`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: CONFIG.CJ_EMAIL, password: CONFIG.CJ_KEY })
@@ -59,23 +63,317 @@ async function getCJToken() {
   return cjToken;
 }
 
-// ============= BEAUTY-FILTER =============
-const BEAUTY_CATEGORIES = ['Beauty','Skin Care','Hair Care','Personal Care','Health','Oral Care','Eye Care','Body Care','Face Care','Makeup','Cosmetics','Massage','Spa'];
-const BEAUTY_WORDS = ['skin','face','beauty','hair','eye','lip','mask','serum','cream','roller','gua','jade','light therapy','whitening','massager','scrubber','razor','vitamin','collagen','therapy','lift','pore','acne','tone','glow','bright','anti aging','wrinkle','moistur','sunscreen','retinol','peptide','hyaluronic','niacin','lash','brow','neck','scalp','dental','teeth','charcoal','exfoli','cleanser','toner','essence','lotion','mist','spray','patch','strip','sponge','blender','brush','eyelid','cellulite','contouring','derma','microcurrent','radiofrequency','infrared','spa','facial','wand','globe','ice','steamer'];
-const NON_BEAUTY = ['vacuum cleaner','car ','automotive','kitchen','food ','pet ','toy ','gaming','computer','phone case','cable','charger','tool','drill','bicycle','sport shoe','fishing','garden','furniture','mattress','curtain','laptop','tablet','headphone','keyboard','mouse pad','watch band','mobile phone','camera','speaker','audio','remote control'];
+// ============= BEAUTY-KATEGORIEN AUTO-DISCOVERY =============
+const BEAUTY_CATEGORY_KEYWORDS = [
+  'beauty', 'skin', 'hair', 'cosmetic', 'makeup', 'personal care',
+  'face', 'eye', 'lip', 'nail', 'oral', 'dental', 'massage', 'spa',
+  'health', 'wellness', 'fragrance', 'perfume', 'body care'
+];
 
-function isBeautyProduct(name, categoryName) {
-  const n = (name || '').toLowerCase();
-  const c = (categoryName || '').toLowerCase();
-  if (BEAUTY_CATEGORIES.some(cat => c.includes(cat.toLowerCase()))) return true;
-  if (NON_BEAUTY.some(nb => n.includes(nb))) return false;
-  return BEAUTY_WORDS.some(w => n.includes(w));
+async function loadBeautyCategoryIds(cjt, log = () => {}) {
+  if (beautyCategoryIds) return { ids: beautyCategoryIds, names: beautyCategoryNames };
+
+  try {
+    const r = await fetch(`${CJ_BASE}/product/getCategory`, {
+      headers: { 'CJ-Access-Token': cjt }
+    });
+    const d = await r.json();
+    if (!d.result || !d.data) {
+      log('Beauty-Kategorien konnten nicht geladen werden, Fallback auf Keyword-Filter', 'warn');
+      beautyCategoryIds = [];
+      return { ids: [], names: [] };
+    }
+
+    const ids = [];
+    const names = [];
+    for (const lv1 of (d.data || [])) {
+      const lv1Name = (lv1.categoryFirstName || '').toLowerCase();
+      const lv1Beauty = BEAUTY_CATEGORY_KEYWORDS.some(kw => lv1Name.includes(kw));
+
+      for (const lv2 of (lv1.categoryFirstList || [])) {
+        const lv2Name = (lv2.categorySecondName || '').toLowerCase();
+        const lv2Beauty = BEAUTY_CATEGORY_KEYWORDS.some(kw => lv2Name.includes(kw));
+
+        for (const lv3 of (lv2.categorySecondList || [])) {
+          const lv3Name = (lv3.categoryName || '').toLowerCase();
+          const lv3Beauty = BEAUTY_CATEGORY_KEYWORDS.some(kw => lv3Name.includes(kw));
+
+          if (lv1Beauty || lv2Beauty || lv3Beauty) {
+            ids.push(lv3.categoryId);
+            names.push(`${lv1.categoryFirstName} > ${lv2.categorySecondName} > ${lv3.categoryName}`);
+          }
+        }
+      }
+    }
+
+    beautyCategoryIds = ids;
+    beautyCategoryNames = names;
+    log(`✓ ${ids.length} Beauty-Kategorien aus CJ geladen`, 'ok');
+    return { ids, names };
+  } catch(e) {
+    log(`Beauty-Kategorien Error: ${e.message}`, 'warn');
+    beautyCategoryIds = [];
+    return { ids: [], names: [] };
+  }
 }
 
-// ============= CJ: Vollständige Bilder-Extraktion =============
+// ============= STRENGE BEAUTY-VALIDIERUNG =============
+const BEAUTY_WORDS = ['skin','face','beauty','hair','eye','lip','mask','serum','cream','roller','gua','jade','light therapy','whitening','massager','scrubber','razor','vitamin','collagen','therapy','lift','pore','acne','tone','glow','bright','anti aging','wrinkle','moistur','sunscreen','retinol','peptide','hyaluronic','niacin','lash','brow','neck','scalp','dental','teeth','charcoal','exfoli','cleanser','toner','essence','lotion','mist','spray','patch','strip','sponge','blender','brush','eyelid','cellulite','contouring','derma','microcurrent','radiofrequency','infrared','spa','facial','wand','globe','ice','steamer','nose','blackhead','red light','led light'];
+const NON_BEAUTY = ['vacuum cleaner','car ','automotive','kitchen','food ','pet ','toy ','gaming','computer','phone case','cable','charger','tool','drill','bicycle','sport shoe','fishing','garden','furniture','mattress','curtain','laptop','tablet','headphone','keyboard','mouse pad','watch band','mobile phone','camera','speaker','audio','remote control'];
+
+function containsBeautyWord(name) {
+  const n = (name || '').toLowerCase();
+  return BEAUTY_WORDS.some(w => n.includes(w));
+}
+function containsNonBeauty(name) {
+  const n = (name || '').toLowerCase();
+  return NON_BEAUTY.some(nb => n.includes(nb));
+}
+
+// ============= CJ V2 SEARCH =============
+async function searchProductsV2(cjt, params) {
+  const queryParams = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === null || v === undefined || v === '') return;
+    if (Array.isArray(v)) {
+      v.forEach(item => queryParams.append(k, item));
+    } else {
+      queryParams.append(k, String(v));
+    }
+  });
+
+  const url = `${CJ_BASE}/product/listV2?${queryParams.toString()}`;
+  const r = await fetch(url, { headers: { 'CJ-Access-Token': cjt } });
+  if (!r.ok) {
+    const errText = await r.text();
+    throw new Error(`CJ V2 Search ${r.status}: ${errText.slice(0,200)}`);
+  }
+  const d = await r.json();
+  if (!d.result) {
+    throw new Error(`CJ V2 Search Error: ${d.message || 'unknown'}`);
+  }
+
+  const products = [];
+  for (const block of (d.data?.content || [])) {
+    for (const p of (block.productList || [])) {
+      products.push({
+        pid: p.id,
+        productNameEn: p.nameEn,
+        productImage: p.bigImage,
+        sellPrice: parseFloat(p.sellPrice || p.nowPrice || 0),
+        nowPrice: p.nowPrice ? parseFloat(p.nowPrice) : null,
+        discountPriceRate: p.discountPriceRate,
+        listedNum: p.listedNum || 0,
+        categoryId: p.categoryId,
+        threeCategoryName: p.threeCategoryName,
+        twoCategoryName: p.twoCategoryName,
+        oneCategoryName: p.oneCategoryName,
+        categoryName: p.threeCategoryName || p.twoCategoryName || p.oneCategoryName,
+        addMarkStatus: p.addMarkStatus,
+        isVideo: p.isVideo,
+        videoList: p.videoList || [],
+        warehouseInventoryNum: p.warehouseInventoryNum || 0,
+        totalVerifiedInventory: p.totalVerifiedInventory || 0,
+        verifiedWarehouse: p.verifiedWarehouse,
+        hasCECertification: p.hasCECertification,
+        deliveryCycle: p.deliveryCycle,
+        description: p.description,
+        supplierName: p.supplierName,
+      });
+    }
+  }
+  return { products, total: d.data?.totalRecords || 0 };
+}
+
+async function searchProductsV1Fallback(cjt, keyword, page = 1) {
+  const r = await fetch(`${CJ_BASE}/product/list?productNameEn=${encodeURIComponent(keyword)}&pageNum=${page}&pageSize=20`, {
+    headers: { 'CJ-Access-Token': cjt }
+  });
+  const d = await r.json();
+  return (d.data?.list || []).map(p => ({
+    pid: p.pid,
+    productNameEn: p.productNameEn,
+    productImage: p.productImage,
+    sellPrice: parseFloat(p.sellPrice || 0),
+    listedNum: p.listedNum || 0,
+    categoryName: p.categoryName,
+    categoryId: p.categoryId,
+  }));
+}
+
+// ============= MULTI-STRATEGY SUCHE =============
+async function findCJProductsForTrend(cjt, trend, log = () => {}) {
+  const beautyCats = beautyCategoryIds || [];
+  const keyword = trend.cjKeyword;
+
+  let result = null;
+
+  // Strategie 1: Strikt — Trending + Verified + Beauty + Free Shipping
+  if (beautyCats.length > 0) {
+    try {
+      result = await searchProductsV2(cjt, {
+        keyWord: keyword,
+        page: 1,
+        size: 30,
+        lv3categoryList: beautyCats,
+        verifiedWarehouse: 1,
+        addMarkStatus: 1,
+        productFlag: 0,
+        orderBy: 1,
+        sort: 'desc',
+        startWarehouseInventory: 50,
+        zonePlatform: 'shopify',
+        features: ['enable_category', 'enable_video'],
+      });
+      if (result.products.length > 0) {
+        log(`  Strategie 1 (Trending+Verified+Beauty+FreeShip): ${result.products.length} Treffer`, 'info');
+      }
+    } catch(e) {
+      log(`  Strategie 1 fehlgeschlagen: ${e.message}`, 'warn');
+    }
+  }
+
+  // Strategie 2: Mittel — Beauty + Verified
+  if (!result || result.products.length < 5) {
+    try {
+      const r2 = await searchProductsV2(cjt, {
+        keyWord: keyword,
+        page: 1,
+        size: 30,
+        lv3categoryList: beautyCats.length > 0 ? beautyCats : undefined,
+        verifiedWarehouse: 1,
+        orderBy: 1,
+        sort: 'desc',
+        features: ['enable_category'],
+      });
+      if (r2.products.length > 0) {
+        log(`  Strategie 2 (Verified+Beauty): ${r2.products.length} Treffer`, 'info');
+        result = result && result.products.length > 0
+          ? { products: [...result.products, ...r2.products.filter(p => !result.products.some(x => x.pid === p.pid))] }
+          : r2;
+      }
+    } catch(e) {
+      log(`  Strategie 2 fehlgeschlagen: ${e.message}`, 'warn');
+    }
+  }
+
+  // Strategie 3: Locker — nur keyword
+  if (!result || result.products.length < 3) {
+    try {
+      const r3 = await searchProductsV2(cjt, {
+        keyWord: keyword,
+        page: 1,
+        size: 30,
+        orderBy: 1,
+        sort: 'desc',
+        features: ['enable_category'],
+      });
+      if (r3.products.length > 0) {
+        log(`  Strategie 3 (nur Keyword): ${r3.products.length} Treffer`, 'info');
+        const filtered = r3.products.filter(p =>
+          !containsNonBeauty(p.productNameEn) && containsBeautyWord(p.productNameEn)
+        );
+        result = result && result.products.length > 0
+          ? { products: [...result.products, ...filtered.filter(p => !result.products.some(x => x.pid === p.pid))] }
+          : { products: filtered };
+      }
+    } catch(e) {
+      log(`  Strategie 3 fehlgeschlagen: ${e.message}`, 'warn');
+    }
+  }
+
+  // V1-Fallback
+  if (!result || result.products.length === 0) {
+    try {
+      log(`  V1-Fallback wird versucht...`, 'warn');
+      const v1 = await searchProductsV1Fallback(cjt, keyword, 1);
+      const filtered = v1.filter(p =>
+        !containsNonBeauty(p.productNameEn) && containsBeautyWord(p.productNameEn)
+      );
+      result = { products: filtered };
+    } catch(e) {
+      log(`  V1-Fallback fehlgeschlagen: ${e.message}`, 'err');
+      return [];
+    }
+  }
+
+  return result?.products || [];
+}
+
+// ============= SMART SCORING =============
+function scoreProduct(p, trend) {
+  let score = 0;
+  const reasons = [];
+
+  if (p.listedNum > 0) {
+    const listScore = Math.min(30, Math.log10(p.listedNum + 1) * 10);
+    score += listScore;
+    reasons.push(`Listings:+${Math.round(listScore)}`);
+  }
+
+  if (p.productImage && p.productImage.startsWith('https://')) score += 10;
+
+  if (beautyCategoryIds && beautyCategoryIds.includes(p.categoryId)) {
+    score += 15;
+    reasons.push('BeautyCat:+15');
+  }
+
+  const name = (p.productNameEn || '').toLowerCase();
+  const kwWords = (trend.cjKeyword || '').toLowerCase().split(' ').filter(w => w.length > 2);
+  const kwMatch = kwWords.filter(w => name.includes(w)).length;
+  if (kwMatch > 0) {
+    score += kwMatch * 8;
+    reasons.push(`KwMatch:+${kwMatch * 8}`);
+  }
+
+  const beautyHits = BEAUTY_WORDS.filter(w => name.includes(w)).length;
+  if (beautyHits > 0) {
+    score += Math.min(15, beautyHits * 3);
+    reasons.push(`BeautyKw:+${Math.min(15, beautyHits * 3)}`);
+  }
+
+  if (containsNonBeauty(name)) {
+    score -= 50;
+    reasons.push('NonBeauty:-50');
+  }
+
+  if (p.verifiedWarehouse === 1) {
+    score += 10;
+    reasons.push('Verified:+10');
+  }
+
+  if (p.warehouseInventoryNum > 100) {
+    score += 5;
+    reasons.push('Stock:+5');
+  }
+
+  if (p.addMarkStatus === 1) {
+    score += 5;
+    reasons.push('FreeShip:+5');
+  }
+
+  if (p.isVideo === 1 || (p.videoList && p.videoList.length > 0)) {
+    score += 5;
+    reasons.push('Video:+5');
+  }
+
+  if (p.hasCECertification === 1) {
+    score += 5;
+    reasons.push('CE:+5');
+  }
+
+  if (p.deliveryCycle && /^[1-5]/.test(p.deliveryCycle)) {
+    score += 5;
+    reasons.push('FastShip:+5');
+  }
+
+  return { score: Math.round(score), reasons };
+}
+
+// ============= CJ DETAILS =============
 async function getCJProductDetails(cjt, pid) {
   try {
-    const r = await fetch(`https://developers.cjdropshipping.com/api2.0/v1/product/query?pid=${pid}`, {
+    const r = await fetch(`${CJ_BASE}/product/query?pid=${pid}&features=enable_video,enable_inventory`, {
       headers: { 'CJ-Access-Token': cjt }
     });
     const d = await r.json();
@@ -89,21 +387,17 @@ async function getCJProductDetails(cjt, pid) {
       }
     };
 
-    // 1. Hauptbild
+    addImg(p.bigImage);
     addImg(p.productImage);
 
-    // 2. productImageSet (oft die meisten Bilder)
     if (p.productImageSet) {
-      try {
-        const set = typeof p.productImageSet === 'string' ? JSON.parse(p.productImageSet) : p.productImageSet;
-        if (Array.isArray(set)) set.forEach(addImg);
-      } catch(e) {}
+      const set = typeof p.productImageSet === 'string' ? JSON.parse(p.productImageSet) : p.productImageSet;
+      if (Array.isArray(set)) set.forEach(addImg);
     }
 
-    // 3. Variant-Bilder
     if (Array.isArray(p.variants)) {
       p.variants.forEach(v => {
-        if (v.variantImage) addImg(v.variantImage);
+        addImg(v.variantImage);
         if (v.variantImages) {
           const vi = Array.isArray(v.variantImages) ? v.variantImages : [v.variantImages];
           vi.forEach(addImg);
@@ -111,23 +405,24 @@ async function getCJProductDetails(cjt, pid) {
       });
     }
 
-    // 4. productKeyEnAttribute (manchmal Attribut-Bilder)
-    if (p.productKeyEnAttribute) {
-      try {
-        const attr = typeof p.productKeyEnAttribute === 'string' ? JSON.parse(p.productKeyEnAttribute) : p.productKeyEnAttribute;
-        if (Array.isArray(attr)) attr.forEach(a => { if (a.image) addImg(a.image); });
-      } catch(e) {}
-    }
-
     return {
       pid: p.pid,
       name: p.productNameEn || p.productName,
       images: images.slice(0, 10),
-      mainImage: images[0] || '',
-      ek: parseFloat(p.sellPrice?.split(' -- ')[0] || p.sellPrice || 0),
+      mainImage: p.bigImage || images[0] || '',
+      ek: parseFloat(p.sellPrice || 0),
       weight: p.productWeight,
       categoryName: p.categoryName,
-      description: (p.description || '').slice(0, 500),
+      description: (p.description || '').slice(0, 600),
+      supplierName: p.supplierName,
+      videoList: p.productVideo || [],
+      hasVideo: (p.productVideo || []).length > 0,
+      variants: (p.variants || []).slice(0, 5).map(v => ({
+        sku: v.variantSku,
+        name: v.variantNameEn,
+        price: v.variantSellPrice,
+        weight: v.variantWeight,
+      })),
     };
   } catch(e) {
     console.error('CJ Detail Error:', e.message);
@@ -135,7 +430,192 @@ async function getCJProductDetails(cjt, pid) {
   }
 }
 
-// ============= PHASE 1: Erweiterte Trend-Analyse =============
+// ============= CJ REVIEWS =============
+async function getCJProductReviews(cjt, pid) {
+  try {
+    const r = await fetch(`${CJ_BASE}/product/productComments?pid=${pid}&pageSize=10`, {
+      headers: { 'CJ-Access-Token': cjt }
+    });
+    const d = await r.json();
+    const list = d.data?.list || [];
+    if (!list.length) return { count: 0, avgScore: null, topReviews: [] };
+
+    const scores = list.map(r => parseInt(r.score, 10)).filter(s => !isNaN(s));
+    const avg = scores.length ? (scores.reduce((a,b) => a+b, 0) / scores.length) : null;
+
+    const top = list.slice(0, 3).map(r => ({
+      score: parseInt(r.score, 10),
+      text: (r.comment || '').slice(0, 200),
+      country: r.countryCode,
+      user: r.commentUser,
+    }));
+
+    return {
+      count: parseInt(d.data?.total || list.length, 10),
+      avgScore: avg ? Math.round(avg * 10) / 10 : null,
+      topReviews: top,
+    };
+  } catch(e) {
+    return { count: 0, avgScore: null, topReviews: [] };
+  }
+}
+
+// ============= CJ STOCK BY COUNTRY =============
+async function getCJStockByPid(cjt, pid) {
+  try {
+    const r = await fetch(`${CJ_BASE}/product/stock/getInventoryByPid?pid=${pid}`, {
+      headers: { 'CJ-Access-Token': cjt }
+    });
+    const d = await r.json();
+    const inv = d.data?.inventories || [];
+    return inv.map(i => ({
+      country: i.countryCode,
+      countryName: i.countryNameEn,
+      total: i.totalInventoryNum || 0,
+      cjStock: i.cjInventoryNum || 0,
+    }));
+  } catch(e) {
+    return [];
+  }
+}
+
+// ============= IMAGE-SANITY-CHECK =============
+async function imageSanityCheck(imageUrl, productName, expectedCategory) {
+  if (!CONFIG.ENABLE_IMAGE_SANITY_CHECK || !CONFIG.CLAUDE_KEY) return { ok: true, skipped: true };
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': CONFIG.CLAUDE_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: CONFIG.CLAUDE_MODEL_VISION,
+        max_tokens: 100,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'url', url: imageUrl } },
+            {
+              type: 'text',
+              text: `Product name: "${productName}"\nExpected category: ${expectedCategory}\n\nDoes this image actually show the named beauty/skincare product? Reply ONLY with valid JSON: {"matches":true/false,"reason":"max 8 words"}`
+            }
+          ]
+        }]
+      })
+    });
+    const d = await r.json();
+    const text = d.content?.[0]?.text?.replace(/```json|```/g, '').trim() || '{}';
+    const parsed = JSON.parse(text);
+    return { ok: parsed.matches !== false, reason: parsed.reason || '' };
+  } catch(e) {
+    return { ok: true, error: e.message };
+  }
+}
+
+// ============= PRICING + IMPORT-PREP =============
+function calculatePricing(ek, trend) {
+  const targetMargin = (trend.estimatedMargin || 70) / 100;
+  const priceRange = trend.priceRange || { min: 15, max: 60 };
+  let vk = ek / (1 - targetMargin);
+  vk = Math.max(vk, priceRange.min);
+  vk = Math.min(vk, priceRange.max);
+  vk = Math.ceil(vk) - 0.01;
+  const compareAt = Math.ceil(vk * 1.3) - 0.01;
+  const margin = Math.round((1 - ek / vk) * 100);
+  return {
+    vk: parseFloat(vk.toFixed(2)),
+    compareAt: parseFloat(compareAt.toFixed(2)),
+    margin
+  };
+}
+
+async function prepareProductForImport(cjt, cjProduct, trend, log = () => {}) {
+  const [details, reviews, stock] = await Promise.all([
+    getCJProductDetails(cjt, cjProduct.pid),
+    getCJProductReviews(cjt, cjProduct.pid),
+    getCJStockByPid(cjt, cjProduct.pid),
+  ]);
+
+  const ek = parseFloat(cjProduct.nowPrice || cjProduct.sellPrice || details?.ek || 0);
+  const { vk, compareAt, margin } = calculatePricing(ek, trend);
+  const allImages = details?.images || [cjProduct.productImage].filter(Boolean);
+
+  let sanityCheck = { ok: true, skipped: true };
+  if (CONFIG.ENABLE_IMAGE_SANITY_CHECK && allImages.length > 0) {
+    sanityCheck = await imageSanityCheck(allImages[0], details?.name || cjProduct.productNameEn, trend.category);
+    log(`  Image-Check "${(details?.name || '').slice(0,40)}": ${sanityCheck.ok ? '✓ passt' : '✗ ' + (sanityCheck.reason || 'Mismatch')}`, sanityCheck.ok ? 'info' : 'warn');
+  }
+
+  const usStock = stock.find(s => s.country === 'US');
+  const cnStock = stock.find(s => s.country === 'CN');
+
+  return {
+    name: details?.name || cjProduct.productNameEn || trend.name,
+    cjId: cjProduct.pid,
+    images: allImages,
+    mainImage: details?.mainImage || cjProduct.productImage || '',
+    imageCount: allImages.length,
+    categoryName: details?.categoryName || cjProduct.categoryName,
+    description: details?.description || '',
+    ek: Math.round(ek * 100) / 100,
+    vk,
+    compareAt,
+    margin,
+    profit: parseFloat((vk - ek).toFixed(2)),
+    listedNum: cjProduct.listedNum || 0,
+    deliveryCycle: cjProduct.deliveryCycle,
+    isFreeShipping: cjProduct.addMarkStatus === 1,
+    hasCECertification: cjProduct.hasCECertification === 1,
+    isVerifiedWarehouse: cjProduct.verifiedWarehouse === 1,
+    warehouseInventory: cjProduct.warehouseInventoryNum || 0,
+    hasVideo: details?.hasVideo || false,
+    videoCount: (details?.videoList || []).length,
+    supplierName: cjProduct.supplierName || details?.supplierName || '',
+    discountPriceRate: cjProduct.discountPriceRate,
+    stock: {
+      us: usStock?.total || 0,
+      cn: cnStock?.total || 0,
+      total: stock.reduce((s, x) => s + x.total, 0),
+      countries: stock.map(s => s.country),
+    },
+    reviews: {
+      count: reviews.count,
+      avgScore: reviews.avgScore,
+      topReviews: reviews.topReviews,
+    },
+    imageSanity: sanityCheck,
+    trend: {
+      name: trend.name,
+      cjKeyword: trend.cjKeyword,
+      viralPlatform: trend.viralPlatform,
+      trendReason: trend.trendReason,
+      monthlySearches: trend.monthlySearches,
+      monthlySales: trend.monthlySales,
+      threeMonthTrend: trend.threeMonthTrend,
+      trendScore: trend.trendScore,
+      category: trend.category,
+      targetAudience: trend.targetAudience,
+      relatedKeywords: trend.relatedKeywords,
+      longTailKeywords: trend.longTailKeywords,
+    }
+  };
+}
+
+async function getExistingTitles(shopToken) {
+  const titles = new Set();
+  try {
+    const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/products.json?limit=250&fields=title`, {
+      headers: { 'X-Shopify-Access-Token': shopToken }
+    });
+    const d = await r.json();
+    (d.products || []).forEach(p => titles.add(p.title.toLowerCase().trim()));
+  } catch(e) {}
+  return titles;
+}
+
+// ============= TREND-ANALYSE =============
 async function analyzeTrends(customKeywords = [], count = 15) {
   if (!CONFIG.CLAUDE_KEY) throw new Error('CLAUDE_KEY fehlt');
 
@@ -151,67 +631,50 @@ Conduct a COMPREHENSIVE A-to-Z product trend analysis. Identify the TOP ${count}
 - Suitable for dropshipping (small, lightweight, profitable)
 - Price range $10-$100${extra}
 
-For EACH trend, provide a complete intelligence report with: search volume, sales volume, 3-month sales history, trend velocity %, trend phase, profit score, viral platform data, related/long-tail keywords, co-purchased items, demographics, competition analysis, and pricing.
+For EACH trend, provide a complete intelligence report.
 
 Respond ONLY with valid JSON, no markdown, no code fences:
 {
   "analysisDate": "April 2026",
   "totalMarketSize": "$X.X billion",
   "marketGrowthRate": "+X% YoY",
-  "topInsights": ["3 top-level insights about beauty market April 2026"],
+  "topInsights": ["3 top-level insights"],
   "trends": [
     {
       "rank": 1,
       "name": "Product trend name",
       "category": "Skincare Tools",
-      "cjKeyword": "2-3 word search keyword for CJ Dropshipping",
+      "cjKeyword": "2-3 word keyword",
       "avgPrice": 35,
       "priceRange": {"min": 25, "max": 55},
-
       "monthlySearches": 450000,
       "monthlySales": 85000,
       "salesHistory": {"month1": 62000, "month2": 71000, "month3": 85000},
       "trendVelocity": "+37%",
-
       "trendPhase": "peak",
       "threeMonthTrend": "growing",
       "trendScore": 94,
       "profitScore": 88,
-
-      "relatedKeywords": ["short kw1","short kw2","short kw3","short kw4","short kw5"],
-      "longTailKeywords": ["specific search phrase 1","phrase 2","phrase 3","phrase 4","phrase 5"],
-      "coPurchaseItems": ["product 1","product 2","product 3"],
-
+      "relatedKeywords": ["kw1","kw2","kw3","kw4","kw5"],
+      "longTailKeywords": ["phrase 1","phrase 2","phrase 3","phrase 4","phrase 5"],
+      "coPurchaseItems": ["item 1","item 2","item 3"],
       "viralPlatform": "TikTok",
       "viralVideos": 1250,
-      "trendReason": "1 sentence explaining why trending now",
+      "trendReason": "1 sentence",
       "sentiment": "positive",
-
       "competition": "medium",
       "competitorBrands": ["brand1","brand2","brand3"],
       "entryDifficulty": "medium",
-
-      "targetAudience": "Women 25-45 interested in glass skin trend",
-      "demographics": {"ageRange": "25-45", "gender": "85% female", "topCountries": ["US","UK","DE"]},
+      "targetAudience": "Women 25-45",
+      "demographics": {"ageRange": "25-45","gender": "85% female","topCountries": ["US","UK","DE"]},
       "seasonality": "evergreen",
-      "bestSellingTime": "Evenings, weekends, year-round",
-
+      "bestSellingTime": "Year-round",
       "estimatedMargin": 72
     }
   ]
 }
 
-CRITICAL RULES:
-- cjKeyword MUST be 2-3 generic words (e.g. "gua sha" not "gua sha rose quartz roller set premium")
-- All numbers must be realistic estimates based on current market data
-- salesHistory must show actual progression: month1 = 3 months ago, month3 = last month
-- trendVelocity = ((month3-month1)/month1)*100 rounded with sign, e.g. "+37%" or "-12%"
-- trendPhase: emerging | growing | peak | declining
-- threeMonthTrend: growing | stable | declining
-- sentiment: positive | mixed | negative
-- entryDifficulty: easy | medium | hard
-- seasonality: evergreen | winter | summer | holiday
-- profitScore = combined metric of margin x volume potential (0-100)`;
+CRITICAL: cjKeyword 2-3 generic words. trendPhase: emerging|growing|peak|declining. competition: low|medium|high. seasonality: evergreen|winter|summer|holiday.`;
 
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -233,34 +696,25 @@ CRITICAL RULES:
   const d = await r.json();
   const truncated = d.stop_reason === 'max_tokens';
   const text = d.content[0].text.replace(/```json|```/g, '').trim();
-
   try {
     return JSON.parse(text);
   } catch(e) {
-    // Repair-Versuch: letzten vollständigen Trend-Eintrag finden und Array sauber schliessen
     const repaired = repairTruncatedTrendJson(text);
     if (repaired) {
-      console.warn(`[trends] JSON war abgeschnitten (truncated=${truncated}), repariert auf ${repaired.trends?.length || 0} Trends`);
+      console.warn(`[trends] JSON truncated=${truncated}, repariert auf ${repaired.trends?.length || 0} Trends`);
       return repaired;
     }
-    throw new Error(`Claude JSON parse error: ${e.message}. Truncated=${truncated}. First 300 chars: ${text.slice(0,300)}`);
+    throw new Error(`Claude JSON parse error: ${e.message}. Truncated=${truncated}.`);
   }
 }
 
-// Repariert abgeschnittenes Trend-JSON: schneidet beim letzten vollständigen Trend ab und schliesst das Array
 function repairTruncatedTrendJson(text) {
   try {
     const arrayStart = text.indexOf('"trends"');
     if (arrayStart < 0) return null;
     const bracketStart = text.indexOf('[', arrayStart);
     if (bracketStart < 0) return null;
-
-    // String-aware Klammer-Bilanz ab dem [
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    let lastValidObjectEnd = -1;
-
+    let depth = 0, inString = false, escape = false, lastValidEnd = -1;
     for (let i = bracketStart + 1; i < text.length; i++) {
       const c = text[i];
       if (escape) { escape = false; continue; }
@@ -268,132 +722,15 @@ function repairTruncatedTrendJson(text) {
       if (c === '"') { inString = !inString; continue; }
       if (inString) continue;
       if (c === '{') depth++;
-      else if (c === '}') {
-        depth--;
-        if (depth === 0) lastValidObjectEnd = i;
-      }
+      else if (c === '}') { depth--; if (depth === 0) lastValidEnd = i; }
     }
-    if (lastValidObjectEnd < 0) return null;
-
-    const repaired = text.slice(0, lastValidObjectEnd + 1) + '\n  ]\n}';
+    if (lastValidEnd < 0) return null;
+    const repaired = text.slice(0, lastValidEnd + 1) + '\n  ]\n}';
     return JSON.parse(repaired);
-  } catch(e) {
-    return null;
-  }
+  } catch(e) { return null; }
 }
 
-// ============= PHASE 2: CJ-Suche mit Top-Kandidaten =============
-async function findCJProductsForTrend(cjt, trend) {
-  try {
-    // 3 Pages = bis zu 30 Kandidaten
-    const pages = await Promise.all([1,2,3].map(page =>
-      fetch(`https://developers.cjdropshipping.com/api2.0/v1/product/list?productNameEn=${encodeURIComponent(trend.cjKeyword)}&pageNum=${page}&pageSize=10`, {
-        headers: { 'CJ-Access-Token': cjt }
-      }).then(r => r.json()).then(d => d.data?.list || []).catch(() => [])
-    ));
-    const list = [].concat(...pages);
-    if (!list.length) return [];
-
-    // Nur Beauty-Produkte mit Bild
-    const beauty = list.filter(p =>
-      isBeautyProduct(p.productNameEn || p.productName, p.categoryName) &&
-      p.productImage && p.productImage.startsWith('https://')
-    );
-    if (!beauty.length) return [];
-
-    // Scoring
-    const scored = beauty.map(p => {
-      const name = (p.productNameEn || '').toLowerCase();
-      const kwWords = trend.cjKeyword.toLowerCase().split(' ').filter(w => w.length > 2);
-      const kwMatch = kwWords.filter(w => name.includes(w)).length;
-      const kwScore = kwMatch * 25;
-
-      const beautyHits = BEAUTY_WORDS.filter(w => name.includes(w)).length;
-      const beautyBonus = Math.min(beautyHits * 4, 20);
-
-      const negHits = NON_BEAUTY.filter(nb => name.includes(nb)).length;
-      const negPenalty = negHits * -50;
-
-      const soldBonus = p.listedNum ? 10 : 0;
-
-      return { ...p, _score: kwScore + beautyBonus + negPenalty + soldBonus };
-    }).sort((a,b) => b._score - a._score);
-
-    return scored.filter(p => p._score > 0).slice(0, 5);
-  } catch(e) {
-    console.error('CJ Search Error:', e.message);
-    return [];
-  }
-}
-
-// ============= Preis-Logik =============
-function calculatePricing(ek, trend) {
-  const targetMargin = (trend.estimatedMargin || 70) / 100;
-  const priceRange = trend.priceRange || { min: 15, max: 60 };
-  let vk = ek / (1 - targetMargin);
-  vk = Math.max(vk, priceRange.min);
-  vk = Math.min(vk, priceRange.max);
-  vk = Math.ceil(vk) - 0.01;
-  const compareAt = Math.ceil(vk * 1.3) - 0.01;
-  const margin = Math.round((1 - ek / vk) * 100);
-  return {
-    vk: parseFloat(vk.toFixed(2)),
-    compareAt: parseFloat(compareAt.toFixed(2)),
-    margin
-  };
-}
-
-// ============= Produkt-Daten für Import vorbereiten =============
-async function prepareProductForImport(cjt, cjProduct, trend) {
-  const details = await getCJProductDetails(cjt, cjProduct.pid);
-  const ek = parseFloat(cjProduct.sellPrice?.split(' -- ')[0] || cjProduct.sellPrice || trend.avgPrice / 2.5);
-  const { vk, compareAt, margin } = calculatePricing(ek, trend);
-  const allImages = details?.images || [cjProduct.productImage].filter(Boolean);
-
-  return {
-    name: details?.name || cjProduct.productNameEn || cjProduct.productName || trend.name,
-    cjId: cjProduct.pid,
-    images: allImages,
-    mainImage: details?.mainImage || cjProduct.productImage || '',
-    imageCount: allImages.length,
-    categoryName: details?.categoryName || cjProduct.categoryName,
-    description: details?.description || '',
-    ek: Math.round(ek * 100) / 100,
-    vk,
-    compareAt,
-    margin,
-    profit: parseFloat((vk - ek).toFixed(2)),
-    trend: {
-      name: trend.name,
-      cjKeyword: trend.cjKeyword,
-      viralPlatform: trend.viralPlatform,
-      trendReason: trend.trendReason,
-      monthlySearches: trend.monthlySearches,
-      monthlySales: trend.monthlySales,
-      threeMonthTrend: trend.threeMonthTrend,
-      trendScore: trend.trendScore,
-      category: trend.category,
-      targetAudience: trend.targetAudience,
-      relatedKeywords: trend.relatedKeywords,
-      longTailKeywords: trend.longTailKeywords,
-    }
-  };
-}
-
-// ============= Bestehende Shopify-Titel =============
-async function getExistingTitles(shopToken) {
-  const titles = new Set();
-  try {
-    const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/products.json?limit=250&fields=title`, {
-      headers: { 'X-Shopify-Access-Token': shopToken }
-    });
-    const d = await r.json();
-    (d.products || []).forEach(p => titles.add(p.title.toLowerCase().trim()));
-  } catch(e) {}
-  return titles;
-}
-
-// ============= Marketing-Content (Haiku) =============
+// ============= MARKETING-CONTENT =============
 async function generateContent(product) {
   if (!CONFIG.CLAUDE_KEY) {
     return { hook: product.trend.trendReason, usp: product.name, description: '', bullets: [] };
@@ -408,17 +745,18 @@ async function generateContent(product) {
       },
       body: JSON.stringify({
         model: CONFIG.CLAUDE_MODEL_COPY,
-        max_tokens: 500,
+        max_tokens: 600,
         messages: [{
           role: 'user',
           content: `Write compelling beauty product copy in English.
 Product: ${product.name}
-Trending because: ${product.trend.trendReason}
+Trending: ${product.trend.trendReason}
 Platform: ${product.trend.viralPlatform}
 Audience: ${product.trend.targetAudience}
 Keywords: ${(product.trend.relatedKeywords || []).join(', ')}
+${product.reviews?.avgScore ? `Avg rating: ${product.reviews.avgScore}/5 from ${product.reviews.count} reviews` : ''}
 
-JSON only, no markdown: {"hook":"emotional 10 word hook","usp":"unique benefit 15 words","description":"2-3 punchy benefit-focused sentences","bullets":["benefit 1","benefit 2","benefit 3","benefit 4","benefit 5"]}`
+JSON only: {"hook":"emotional 10 word hook","usp":"unique benefit 15 words","description":"2-3 punchy benefit sentences","bullets":["benefit 1","benefit 2","benefit 3","benefit 4","benefit 5"]}`
         }]
       })
     });
@@ -429,15 +767,22 @@ JSON only, no markdown: {"hook":"emotional 10 word hook","usp":"unique benefit 1
   }
 }
 
-// ============= Shopify Publish =============
+// ============= SHOPIFY PUBLISH =============
 async function publishProduct(shopToken, product, content) {
   const bullets = (content.bullets || []).map(b => `<li>${b}</li>`).join('');
+  const reviewsHtml = product.reviews?.avgScore
+    ? `<p>⭐ <strong>${product.reviews.avgScore}/5</strong> · ${product.reviews.count} reviews</p>`
+    : '';
+  const ceHtml = product.hasCECertification ? '<p>🏷️ <strong>CE Certified</strong></p>' : '';
+
   const body = {
     product: {
       title: product.name,
       body_html: `<p><strong><em>${content.hook || ''}</em></strong></p>
 <p>${content.description || content.usp || ''}</p>
 ${bullets ? `<ul>${bullets}</ul>` : ''}
+${reviewsHtml}
+${ceHtml}
 <p>⭐ <strong>Trending on ${product.trend.viralPlatform}:</strong> ${product.trend.trendReason}</p>
 <p><em>🌍 Ships worldwide · ↩ 30-day returns · 🔒 Secure payment</em></p>`,
       vendor: 'ZoraSkin',
@@ -447,6 +792,8 @@ ${bullets ? `<ul>${bullets}</ul>` : ''}
         'Trending 2026',
         product.trend.viralPlatform + ' Viral',
         'ZoraSkin',
+        product.hasCECertification ? 'CE Certified' : null,
+        product.isVerifiedWarehouse ? 'Verified Stock' : null,
         ...(product.trend.relatedKeywords || []).slice(0, 3)
       ].filter(Boolean).join(','),
       status: 'active',
@@ -478,23 +825,48 @@ ${bullets ? `<ul>${bullets}</ul>` : ''}
 
 // ============= ROUTES =============
 app.get('/', (req, res) => res.json({
-  status: 'ZoraSkin Backend v8.1',
-  features: ['Erweiterte Trend-Analyse mit 3-Monats-Verlauf', 'Multi-Kandidaten CJ-Suche (3 pro Trend)', 'Bis zu 10 Bilder pro Produkt', 'Long-tail Keywords + Demographics'],
-  endpoints: ['/api/test', '/api/trends/analyze', '/api/products/search', '/api/products/import', '/api/shopify/products']
+  status: 'ZoraSkin Backend v8.2',
+  features: [
+    'CJ V2-API mit Elasticsearch',
+    'Multi-Strategy Suche (Trending → Verified → Locker → V1-Fallback)',
+    'Auto-Discovery Beauty-Kategorien',
+    'Echte CJ-Bewertungen + Lager-Daten pro Land',
+    'Smart Scoring mit listedNum + Verified-Status',
+    'Optional: Image-Sanity-Check via Vision-API',
+  ],
+  endpoints: ['/api/test', '/api/categories', '/api/trends/analyze', '/api/products/search', '/api/products/import', '/api/shopify/products']
 }));
 
 app.get('/api/test', async (req, res) => {
   const r = {};
   try { await getShopifyToken(); r.shopify = 'verbunden'; } catch(e) { r.shopify = 'Fehler: ' + e.message; }
-  try { await getCJToken(); r.cj = 'verbunden'; } catch(e) { r.cj = 'Fehler: ' + e.message; }
+  try {
+    await getCJToken();
+    r.cj = 'verbunden';
+    if (!beautyCategoryIds) {
+      await loadBeautyCategoryIds(cjToken);
+    }
+    r.beautyCategories = beautyCategoryIds?.length || 0;
+  } catch(e) { r.cj = 'Fehler: ' + e.message; }
   r.claude = CONFIG.CLAUDE_KEY ? 'Key vorhanden' : 'Key fehlt';
   r.config = {
     shopifyDomain: CONFIG.SHOPIFY_DOMAIN || 'fehlt',
     apiVersion: CONFIG.SHOPIFY_API_VERSION,
     claudeModelTrends: CONFIG.CLAUDE_MODEL_TRENDS,
     claudeModelCopy: CONFIG.CLAUDE_MODEL_COPY,
+    imageSanityCheck: CONFIG.ENABLE_IMAGE_SANITY_CHECK,
   };
   res.json(r);
+});
+
+app.get('/api/categories', async (req, res) => {
+  try {
+    const cjt = await getCJToken();
+    const { ids, names } = await loadBeautyCategoryIds(cjt);
+    res.json({ count: ids.length, categories: names });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/shopify/products', async (req, res) => {
@@ -517,7 +889,6 @@ app.get('/api/shopify/products', async (req, res) => {
   }
 });
 
-// PHASE 1: Trend-Analyse
 app.post('/api/trends/analyze', async (req, res) => {
   const { customKeywords = [], count = 15 } = req.body;
   try {
@@ -528,7 +899,6 @@ app.post('/api/trends/analyze', async (req, res) => {
   }
 });
 
-// PHASE 2: Mehrere Kandidaten pro bestätigtem Trend
 app.post('/api/products/search', async (req, res) => {
   const { confirmedTrends = [] } = req.body;
   if (!confirmedTrends.length) return res.status(400).json({ error: 'Keine Trends bestätigt' });
@@ -539,42 +909,59 @@ app.post('/api/products/search', async (req, res) => {
   try {
     const cjt = await getCJToken();
     L('CJDropshipping verbunden', 'ok');
+
+    await loadBeautyCategoryIds(cjt, L);
+
     const shopToken = await getShopifyToken();
     const existingTitles = await getExistingTitles(shopToken);
-    L(`${existingTitles.size} bestehende Produkte geladen (Duplikat-Check)`, 'info');
+    L(`${existingTitles.size} bestehende Produkte für Duplikat-Check geladen`, 'info');
 
     const trendResults = [];
     for (const trend of confirmedTrends) {
-      L(`Suche bei CJ: "${trend.name}" (Keyword: "${trend.cjKeyword}")`, 'info');
-      const candidates = await findCJProductsForTrend(cjt, trend);
+      L(`━━━ "${trend.name}" (Keyword: "${trend.cjKeyword}") ━━━`, 'info');
 
+      const candidates = await findCJProductsForTrend(cjt, trend, L);
       if (!candidates.length) {
-        L(`  ✗ Keine passenden Beauty-Produkte gefunden`, 'warn');
-        trendResults.push({ trend, candidates: [], message: 'Keine passenden Produkte' });
+        L(`  ✗ Keine Beauty-Produkte gefunden`, 'warn');
+        trendResults.push({ trend, candidates: [], message: 'Keine Treffer' });
         continue;
       }
 
-      // Top 3 mit vollen Bilder-Details
-      const detailedCandidates = [];
-      for (const cand of candidates.slice(0, 3)) {
-        const prepared = await prepareProductForImport(cjt, cand, trend);
-        const isDup = prepared.name && existingTitles.has(prepared.name.toLowerCase().trim());
-        detailedCandidates.push({ ...prepared, isDuplicate: isDup, score: cand._score });
-        L(`  ✓ Kandidat: "${prepared.name}" | ${prepared.imageCount} Bilder | $${prepared.vk}${isDup ? ' (DUPLIKAT)' : ''}`, isDup ? 'warn' : 'ok');
-      }
+      const scored = candidates.map(p => {
+        const { score, reasons } = scoreProduct(p, trend);
+        return { ...p, _score: score, _scoreReasons: reasons };
+      }).sort((a, b) => b._score - a._score);
 
-      trendResults.push({ trend, candidates: detailedCandidates });
+      L(`  ✓ ${scored.length} Beauty-Produkte gefunden, Top-Score: ${scored[0]._score}`, 'ok');
+
+      const top3 = scored.slice(0, 3);
+      const detailedCandidates = await Promise.all(
+        top3.map(c => prepareProductForImport(cjt, c, trend, L))
+      );
+
+      const enriched = detailedCandidates.map((d, i) => {
+        const isDup = d.name && existingTitles.has(d.name.toLowerCase().trim());
+        if (isDup) L(`  ⚠ DUPLIKAT: "${d.name}"`, 'warn');
+        return { ...d, isDuplicate: isDup, score: top3[i]._score, scoreReasons: top3[i]._scoreReasons };
+      });
+
+      enriched.forEach((c, i) => {
+        const reviewInfo = c.reviews.avgScore ? ` · ${c.reviews.avgScore}★ (${c.reviews.count})` : '';
+        const stockInfo = c.stock.us > 0 ? ` · US:${c.stock.us}` : '';
+        L(`  ${i+1}. "${c.name}" | $${c.vk} | ${c.imageCount} Bilder | ${c.listedNum} Listings${reviewInfo}${stockInfo}`, 'info');
+      });
+
+      trendResults.push({ trend, candidates: enriched });
     }
 
     const totalCands = trendResults.reduce((s, r) => s + r.candidates.length, 0);
-    L(`Suche fertig: ${totalCands} Kandidaten für ${confirmedTrends.length} Trends`, 'ok');
+    L(`━━━ FERTIG: ${totalCands} Kandidaten für ${confirmedTrends.length} Trends ━━━`, 'ok');
     res.json({ success: true, trendResults, log });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message, log });
   }
 });
 
-// PHASE 4: Bestätigte Produkte importieren
 app.post('/api/products/import', async (req, res) => {
   const { confirmedProducts = [] } = req.body;
   if (!confirmedProducts.length) return res.status(400).json({ error: 'Keine Produkte bestätigt' });
@@ -607,13 +994,13 @@ app.post('/api/products/import', async (req, res) => {
           images: product.images.length,
           status: 'live'
         });
-        L(`✓ LIVE: ${product.name} | $${product.vk} (war $${product.compareAt}) | ${product.margin}% Marge | ${product.images.length} Bilder`, 'ok');
+        L(`✓ LIVE: ${product.name} | $${product.vk} | ${product.margin}% Marge`, 'ok');
       } catch(e) {
         L(`✗ Fehler bei ${product.name}: ${e.message}`, 'err');
       }
     }
 
-    L(`=== FERTIG: ${published}/${confirmedProducts.length} Produkte live ===`, 'ok');
+    L(`=== FERTIG: ${published}/${confirmedProducts.length} live ===`, 'ok');
     res.json({ success: true, published, total: confirmedProducts.length, results, log });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message, log });
@@ -621,4 +1008,4 @@ app.post('/api/products/import', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`ZoraSkin Backend v8.1 auf Port ${PORT}`));
+app.listen(PORT, () => console.log(`ZoraSkin Backend v8.2 auf Port ${PORT}`));
