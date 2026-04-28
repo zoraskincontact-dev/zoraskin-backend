@@ -222,7 +222,7 @@ CRITICAL RULES:
     },
     body: JSON.stringify({
       model: CONFIG.CLAUDE_MODEL_TRENDS,
-      max_tokens: 8000,
+      max_tokens: 16000,
       messages: [{ role: 'user', content: prompt }]
     })
   });
@@ -231,11 +231,54 @@ CRITICAL RULES:
     throw new Error(`Claude API ${r.status}: ${err.slice(0,200)}`);
   }
   const d = await r.json();
+  const truncated = d.stop_reason === 'max_tokens';
   const text = d.content[0].text.replace(/```json|```/g, '').trim();
+
   try {
     return JSON.parse(text);
   } catch(e) {
-    throw new Error(`Claude JSON parse error: ${e.message}. First 200 chars: ${text.slice(0,200)}`);
+    // Repair-Versuch: letzten vollständigen Trend-Eintrag finden und Array sauber schliessen
+    const repaired = repairTruncatedTrendJson(text);
+    if (repaired) {
+      console.warn(`[trends] JSON war abgeschnitten (truncated=${truncated}), repariert auf ${repaired.trends?.length || 0} Trends`);
+      return repaired;
+    }
+    throw new Error(`Claude JSON parse error: ${e.message}. Truncated=${truncated}. First 300 chars: ${text.slice(0,300)}`);
+  }
+}
+
+// Repariert abgeschnittenes Trend-JSON: schneidet beim letzten vollständigen Trend ab und schliesst das Array
+function repairTruncatedTrendJson(text) {
+  try {
+    const arrayStart = text.indexOf('"trends"');
+    if (arrayStart < 0) return null;
+    const bracketStart = text.indexOf('[', arrayStart);
+    if (bracketStart < 0) return null;
+
+    // String-aware Klammer-Bilanz ab dem [
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let lastValidObjectEnd = -1;
+
+    for (let i = bracketStart + 1; i < text.length; i++) {
+      const c = text[i];
+      if (escape) { escape = false; continue; }
+      if (c === '\\') { escape = true; continue; }
+      if (c === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (c === '{') depth++;
+      else if (c === '}') {
+        depth--;
+        if (depth === 0) lastValidObjectEnd = i;
+      }
+    }
+    if (lastValidObjectEnd < 0) return null;
+
+    const repaired = text.slice(0, lastValidObjectEnd + 1) + '\n  ]\n}';
+    return JSON.parse(repaired);
+  } catch(e) {
+    return null;
   }
 }
 
