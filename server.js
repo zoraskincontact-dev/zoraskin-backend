@@ -1509,5 +1509,389 @@ app.get('/api/audit/duplicates', async (req, res) => {
   }
 });
 
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║  ZORASKIN SHOP SETUP — v1.0                                      ║
+// ║  Browser-basiertes Komplett-Setup: Pages, Menus, Theme-Config    ║
+// ║  Aufruf:  GET  /setup            → Browser-Seite mit Knopf       ║
+// ║           POST /api/shop/setup   → führt Setup durch             ║
+// ║  Nutzt bestehende Helper aus v8.4 (getShopifyToken, CONFIG)      ║
+// ╚══════════════════════════════════════════════════════════════════╝
+
+const SETUP_COLLECTIONS = [
+  { title: 'Bestsellers', handle: 'bestsellers',
+    body_html: '<p>The pieces our community can\'t stop talking about.</p>',
+    rules: [{ column: 'tag', relation: 'equals', condition: 'Trending 2026' }],
+    disjunctive: true, sort_order: 'best-selling' },
+  { title: 'Skincare Tools', handle: 'skincare-tools',
+    body_html: '<p>Premium tools for sculpting, depuffing, and lifting.</p>',
+    rules: [
+      { column: 'title', relation: 'contains', condition: 'gua sha' },
+      { column: 'title', relation: 'contains', condition: 'roller' },
+      { column: 'title', relation: 'contains', condition: 'massager' },
+      { column: 'title', relation: 'contains', condition: 'globe' },
+      { column: 'tag', relation: 'contains', condition: 'tool' }
+    ], disjunctive: true, sort_order: 'best-selling' },
+  { title: 'LED Therapy', handle: 'led-therapy',
+    body_html: '<p>Red light, blue light, infrared. Clinical-grade devices for at-home treatment.</p>',
+    rules: [
+      { column: 'title', relation: 'contains', condition: 'led' },
+      { column: 'title', relation: 'contains', condition: 'light therapy' },
+      { column: 'title', relation: 'contains', condition: 'red light' },
+      { column: 'tag', relation: 'contains', condition: 'led' }
+    ], disjunctive: true, sort_order: 'best-selling' },
+  { title: 'Daily Rituals', handle: 'daily-rituals',
+    body_html: '<p>Cleansers, serums, masks, and creams. The everyday essentials.</p>',
+    rules: [
+      { column: 'title', relation: 'contains', condition: 'cream' },
+      { column: 'title', relation: 'contains', condition: 'serum' },
+      { column: 'title', relation: 'contains', condition: 'mask' },
+      { column: 'title', relation: 'contains', condition: 'cleanser' },
+      { column: 'title', relation: 'contains', condition: 'steamer' }
+    ], disjunctive: true, sort_order: 'best-selling' },
+  { title: 'New Arrivals', handle: 'new-arrivals',
+    body_html: '<p>Just landed. Be the first to try our latest drops.</p>',
+    rules: [{ column: 'vendor', relation: 'equals', condition: 'ZoraSkin' }],
+    disjunctive: false, sort_order: 'created-desc' },
+  { title: 'EU Fast Shipping', handle: 'eu-fast-shipping',
+    body_html: '<p>Ships from European warehouses — receive in 3–7 business days.</p>',
+    rules: [{ column: 'tag', relation: 'equals', condition: 'EU Stock' }],
+    disjunctive: false, sort_order: 'best-selling' }
+];
+
+const SETUP_PAGES = [
+  { handle: 'about', title: 'About ZoraSkin',
+    body_html: '<p><em>ZoraSkin started with a simple frustration: too many beauty products promise everything and deliver nothing.</em></p><p>We\'re a small team of skincare obsessives who believe that real results come from two things — well-engineered tools and clean, no-nonsense formulations. Nothing else.</p><h3>What we believe</h3><ul><li><strong>Craft over hype.</strong> We test every product for months before launch.</li><li><strong>Honest formulations.</strong> Cruelty-free, dermatologist-tested.</li><li><strong>Built to last.</strong> Premium materials.</li></ul><h3>Where we ship</h3><p>Worldwide. Many of our products ship from European warehouses for 3–7 day delivery in EU/UK; orders to other regions arrive within 7–14 business days.</p><h3>Get in touch</h3><p>Questions? Email <a href="mailto:zoraskin.contact@gmail.com">zoraskin.contact@gmail.com</a>.</p>' },
+  { handle: 'contact', title: 'Contact Us',
+    body_html: '<p>We\'d love to hear from you. Most messages get a reply within 24 hours.</p><h3>General inquiries</h3><p><strong>Email:</strong> <a href="mailto:zoraskin.contact@gmail.com">zoraskin.contact@gmail.com</a></p><h3>Order support</h3><p>Already have an order? Include your order number for the fastest response.</p><h3>Response time</h3><p>Monday–Friday: within 24 hours<br>Weekends: within 48 hours</p>' },
+  { handle: 'shipping', title: 'Shipping Information',
+    body_html: '<h3>Shipping rates</h3><ul><li><strong>Free worldwide shipping</strong> on orders over $50</li><li>Standard shipping (under $50): $4.99 flat rate</li></ul><h3>Delivery times</h3><ul><li><strong>EU / UK (from EU warehouse):</strong> 3–7 business days 🇪🇺</li><li><strong>USA, Canada (from US warehouse):</strong> 7–12 business days 🇺🇸</li><li><strong>Rest of world:</strong> 12–18 business days</li></ul><p><em>Each product page shows the expected shipping time based on warehouse availability.</em></p><h3>Tracking</h3><p>You\'ll receive a tracking link by email as soon as your order ships.</p><h3>Customs &amp; duties</h3><p>For international orders outside the warehouse region, any import duties or taxes are the responsibility of the recipient.</p>' },
+  { handle: 'returns', title: 'Returns &amp; Exchanges',
+    body_html: '<h3>30-day money-back guarantee</h3><p>Not in love with your purchase? Send it back within 30 days for a full refund. No questions asked.</p><h3>How to return</h3><ol><li>Email <a href="mailto:zoraskin.contact@gmail.com">zoraskin.contact@gmail.com</a> with your order number</li><li>We\'ll send you a return label and instructions</li><li>Drop off the package at your local post office</li><li>Refund processed within 5 business days of receipt</li></ol><h3>Conditions</h3><ul><li>Items in original condition (skincare tools cleaned)</li><li>Opened cosmetic products excluded for hygiene reasons</li></ul><h3>EU customers — Right of withdrawal</h3><p>Per EU consumer law, you have a 14-day right of withdrawal from receipt of goods, no reason required. Our 30-day policy extends this further at our discretion.</p><h3>Damaged items</h3><p>Email us a photo — we\'ll send a replacement at no cost.</p>' },
+  { handle: 'faq', title: 'Frequently Asked Questions',
+    body_html: '<h3>Are your products cruelty-free?</h3><p>Yes. Every ZoraSkin product is cruelty-free.</p><h3>Are the materials safe?</h3><p>All our gua sha tools, rollers, and globes are made from genuine semi-precious stones. LED devices are CE-certified where applicable.</p><h3>How do I clean my gua sha or roller?</h3><p>Wash with warm water and gentle soap after each use. Pat dry.</p><h3>Will I see results?</h3><p>Most customers notice visible changes within 2–3 weeks of consistent use (3–5 times per week).</p><h3>Where do you ship from?</h3><p>From multiple fulfillment centers — typically the closest to you. EU customers usually receive items from our European warehouses for fastest delivery.</p><h3>Can I cancel my order?</h3><p>If your order hasn\'t shipped yet, yes — email us within 12 hours of ordering.</p>' },
+  { handle: 'imprint', title: 'Imprint',
+    body_html: '<p><em>Information per Swiss e-commerce regulations and the EU Digital Services Act.</em></p><h3>Operator</h3><p>[Your full name]<br>[Your street + number]<br>[ZIP] Bern<br>Switzerland</p><h3>Contact</h3><p>Email: <a href="mailto:zoraskin.contact@gmail.com">zoraskin.contact@gmail.com</a><br>Phone: [+41 XX XXX XX XX]</p><h3>UID / VAT</h3><p>[CH-UID-Number — only if registered as a business]</p><h3>Online dispute resolution (EU customers)</h3><p>European Commission platform: <a href="https://ec.europa.eu/consumers/odr" target="_blank" rel="noopener">https://ec.europa.eu/consumers/odr</a></p><h3>Disclaimer</h3><p>Despite careful content control, we assume no liability for the content of external links.</p>' }
+];
+
+// GraphQL Helper (nutzt bestehende getShopifyToken + CONFIG)
+async function setupShopifyGraphQL(query, variables = {}) {
+  const token = await getShopifyToken();
+  const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/graphql.json`, {
+    method: 'POST',
+    headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables })
+  });
+  const data = await r.json();
+  if (data.errors) throw new Error('GraphQL: ' + JSON.stringify(data.errors));
+  return data.data;
+}
+
+// REST Helper (nutzt bestehende getShopifyToken + CONFIG)
+async function setupShopifyREST(path, options = {}) {
+  const token = await getShopifyToken();
+  const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}${path}`, {
+    ...options,
+    headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json', ...(options.headers || {}) }
+  });
+  if (!r.ok) {
+    const txt = await r.text();
+    throw new Error(`${options.method || 'GET'} ${path} → ${r.status}: ${txt.slice(0, 300)}`);
+  }
+  return r.json();
+}
+
+// SETUP-API Endpoint
+app.post('/api/shop/setup', async (req, res) => {
+  const log = [];
+  const L = (msg, type = 'info') => { log.push({ msg, type, time: new Date().toISOString() }); console.log(`[setup:${type}] ${msg}`); };
+
+  try {
+    L('Setup gestartet', 'sys');
+    await getShopifyToken();
+    L('Shopify-Auth OK', 'ok');
+
+    // STEP 1: Theme finden
+    const themesData = await setupShopifyREST('/themes.json');
+    const theme = themesData.themes.find(t => t.name === 'ZoraSkin')
+      || themesData.themes.find(t => t.role === 'unpublished' && t.name.toLowerCase().includes('zora'))
+      || themesData.themes.find(t => t.role === 'main');
+    if (!theme) throw new Error('Theme "ZoraSkin" nicht gefunden. Lade es zuerst hoch (Online Store → Themes → Add theme → Upload zip).');
+    L(`Theme gefunden: "${theme.name}" (Role: ${theme.role})`, 'ok');
+
+    // STEP 2: Produkte zählen
+    const products = (await setupShopifyREST('/products.json?limit=250&fields=id,title,tags,vendor')).products;
+    L(`${products.length} Produkte im Shop`, 'info');
+
+    // STEP 3: Smart Collections
+    const existingCols = (await setupShopifyREST('/smart_collections.json?limit=250')).smart_collections;
+    const collections = [];
+    for (const def of SETUP_COLLECTIONS) {
+      const found = existingCols.find(c => c.handle === def.handle);
+      if (found) {
+        collections.push({ ...def, id: found.id, gid: `gid://shopify/Collection/${found.id}` });
+        L(`Collection "${def.title}" existiert bereits — übersprungen`, 'info');
+      } else {
+        const r = await setupShopifyREST('/smart_collections.json', {
+          method: 'POST', body: JSON.stringify({ smart_collection: def })
+        });
+        collections.push({ ...def, id: r.smart_collection.id, gid: `gid://shopify/Collection/${r.smart_collection.id}` });
+        L(`Collection "${def.title}" angelegt (ID ${r.smart_collection.id})`, 'ok');
+      }
+      await new Promise(r => setTimeout(r, 400));
+    }
+
+    // STEP 4: Pages
+    const existingPages = (await setupShopifyREST('/pages.json?limit=250')).pages;
+    const pages = [];
+    for (const def of SETUP_PAGES) {
+      const found = existingPages.find(p => p.handle === def.handle);
+      if (found) {
+        await setupShopifyREST(`/pages/${found.id}.json`, {
+          method: 'PUT',
+          body: JSON.stringify({ page: { id: found.id, body_html: def.body_html, title: def.title } })
+        });
+        pages.push({ ...def, id: found.id, gid: `gid://shopify/Page/${found.id}` });
+        L(`Page "${def.title}" aktualisiert`, 'ok');
+      } else {
+        const r = await setupShopifyREST('/pages.json', {
+          method: 'POST',
+          body: JSON.stringify({ page: { ...def, published: true } })
+        });
+        pages.push({ ...def, id: r.page.id, gid: `gid://shopify/Page/${r.page.id}` });
+        L(`Page "${def.title}" angelegt`, 'ok');
+      }
+      await new Promise(r => setTimeout(r, 400));
+    }
+
+    // STEP 5: Menus
+    const colByHandle = Object.fromEntries(collections.map(c => [c.handle, c]));
+    const pageByHandle = Object.fromEntries(pages.map(p => [p.handle, p]));
+
+    const MENUS = [
+      { title: 'Main menu', handle: 'main-menu', items: [
+        { title: 'Shop', type: 'COLLECTION', resourceId: colByHandle['bestsellers']?.gid, url: '/collections/bestsellers' },
+        { title: 'Bestsellers', type: 'COLLECTION', resourceId: colByHandle['bestsellers']?.gid, url: '/collections/bestsellers' },
+        { title: 'Skincare Tools', type: 'COLLECTION', resourceId: colByHandle['skincare-tools']?.gid, url: '/collections/skincare-tools' },
+        { title: 'LED Therapy', type: 'COLLECTION', resourceId: colByHandle['led-therapy']?.gid, url: '/collections/led-therapy' },
+        { title: 'Fast EU Shipping', type: 'COLLECTION', resourceId: colByHandle['eu-fast-shipping']?.gid, url: '/collections/eu-fast-shipping' },
+        { title: 'About', type: 'PAGE', resourceId: pageByHandle['about']?.gid, url: '/pages/about' }
+      ]},
+      { title: 'Footer Shop', handle: 'footer', items: [
+        { title: 'Bestsellers', type: 'COLLECTION', resourceId: colByHandle['bestsellers']?.gid, url: '/collections/bestsellers' },
+        { title: 'New Arrivals', type: 'COLLECTION', resourceId: colByHandle['new-arrivals']?.gid, url: '/collections/new-arrivals' },
+        { title: 'Skincare Tools', type: 'COLLECTION', resourceId: colByHandle['skincare-tools']?.gid, url: '/collections/skincare-tools' },
+        { title: 'LED Therapy', type: 'COLLECTION', resourceId: colByHandle['led-therapy']?.gid, url: '/collections/led-therapy' },
+        { title: 'Daily Rituals', type: 'COLLECTION', resourceId: colByHandle['daily-rituals']?.gid, url: '/collections/daily-rituals' },
+        { title: 'EU Fast Shipping', type: 'COLLECTION', resourceId: colByHandle['eu-fast-shipping']?.gid, url: '/collections/eu-fast-shipping' }
+      ]},
+      { title: 'Footer Support', handle: 'footer-support', items: [
+        { title: 'Contact us', type: 'PAGE', resourceId: pageByHandle['contact']?.gid, url: '/pages/contact' },
+        { title: 'Shipping', type: 'PAGE', resourceId: pageByHandle['shipping']?.gid, url: '/pages/shipping' },
+        { title: 'Returns', type: 'PAGE', resourceId: pageByHandle['returns']?.gid, url: '/pages/returns' },
+        { title: 'FAQ', type: 'PAGE', resourceId: pageByHandle['faq']?.gid, url: '/pages/faq' }
+      ]},
+      { title: 'Footer Company', handle: 'footer-company', items: [
+        { title: 'About', type: 'PAGE', resourceId: pageByHandle['about']?.gid, url: '/pages/about' },
+        { title: 'Imprint', type: 'PAGE', resourceId: pageByHandle['imprint']?.gid, url: '/pages/imprint' },
+        { title: 'Privacy Policy', type: 'HTTP', url: '/policies/privacy-policy' },
+        { title: 'Terms of Service', type: 'HTTP', url: '/policies/terms-of-service' },
+        { title: 'Refund Policy', type: 'HTTP', url: '/policies/refund-policy' }
+      ]}
+    ];
+
+    const existingMenus = (await setupShopifyGraphQL(`query{menus(first:50){nodes{id handle title}}}`)).menus.nodes;
+    const existingMenuMap = Object.fromEntries(existingMenus.map(m => [m.handle, m]));
+
+    for (const menu of MENUS) {
+      const items = menu.items
+        .filter(i => i.type === 'HTTP' || i.resourceId)
+        .map(i => i.type === 'HTTP'
+          ? { title: i.title, type: 'HTTP', url: i.url }
+          : { title: i.title, type: i.type, resourceId: i.resourceId });
+
+      if (existingMenuMap[menu.handle]) {
+        const r = await setupShopifyGraphQL(
+          `mutation menuUpdate($id:ID!,$title:String!,$handle:String!,$items:[MenuItemUpdateInput!]!){menuUpdate(id:$id,title:$title,handle:$handle,items:$items){menu{id} userErrors{field message}}}`,
+          { id: existingMenuMap[menu.handle].id, title: menu.title, handle: menu.handle, items }
+        );
+        if (r.menuUpdate.userErrors.length) {
+          L(`Menu "${menu.title}" Fehler: ${JSON.stringify(r.menuUpdate.userErrors)}`, 'err');
+        } else {
+          L(`Menu "${menu.title}" aktualisiert (${items.length} Links)`, 'ok');
+        }
+      } else {
+        const r = await setupShopifyGraphQL(
+          `mutation menuCreate($title:String!,$handle:String!,$items:[MenuItemCreateInput!]!){menuCreate(title:$title,handle:$handle,items:$items){menu{id} userErrors{field message}}}`,
+          { title: menu.title, handle: menu.handle, items }
+        );
+        if (r.menuCreate.userErrors.length) {
+          L(`Menu "${menu.title}" Fehler: ${JSON.stringify(r.menuCreate.userErrors)}`, 'err');
+        } else {
+          L(`Menu "${menu.title}" angelegt (${items.length} Links)`, 'ok');
+        }
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    // STEP 6: Theme Settings
+    const settingsData = {
+      current: {
+        color_background: '#faf6f0', color_surface: '#ffffff', color_surface_alt: '#f5f0e8',
+        color_text: '#1a1410', color_muted: '#8a7d72', color_accent: '#c9956a',
+        color_sage: '#3d7a5c', page_width: 1280, cart_type: 'page'
+      },
+      presets: { 'ZoraSkin Default': { color_background: '#faf6f0', color_accent: '#c9956a', page_width: 1280 } }
+    };
+    await setupShopifyREST(`/themes/${theme.id}/assets.json`, {
+      method: 'PUT',
+      body: JSON.stringify({ asset: { key: 'config/settings_data.json', value: JSON.stringify(settingsData, null, 2) } })
+    });
+    L('Theme-Settings (Farben, Layout) gesetzt', 'ok');
+
+    L('=== SETUP ABGESCHLOSSEN ===', 'ok');
+    res.json({
+      success: true,
+      collections: collections.length,
+      pages: pages.length,
+      menus: MENUS.length,
+      themeName: theme.name,
+      themePublished: theme.role === 'main',
+      log
+    });
+  } catch (e) {
+    L(`FEHLER: ${e.message}`, 'err');
+    res.status(500).json({ success: false, error: e.message, log });
+  }
+});
+
+// HTML-Setup-Seite
+app.get('/setup', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!DOCTYPE html>
+<html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ZoraSkin Shop Setup</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:#faf6f0;color:#1a1410;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}
+.wrap{max-width:680px;width:100%}
+.card{background:#fff;border-radius:14px;padding:3rem 2.5rem;box-shadow:0 8px 30px rgba(26,20,16,.08)}
+.logo{font-family:'Cormorant Garamond',serif;font-size:32px;letter-spacing:.3em;text-align:center;margin-bottom:.5rem}
+.subtitle{text-align:center;color:#8a7d72;font-size:13px;letter-spacing:.1em;text-transform:uppercase;margin-bottom:2.5rem}
+h2{font-family:'Cormorant Garamond',serif;font-weight:400;font-size:1.65rem;margin-bottom:.75rem}
+p{color:#5a4f47;line-height:1.65;margin-bottom:1rem}
+.task-list{margin:1.5rem 0;padding:0;list-style:none}
+.task-list li{padding:.65rem 0 .65rem 1.85rem;position:relative;color:#5a4f47;font-size:14px}
+.task-list li::before{content:'✓';position:absolute;left:0;color:#3d7a5c;font-weight:700}
+.btn{display:block;width:100%;padding:1.1rem 2rem;background:#1a1410;color:#fff;border:0;border-radius:6px;font-size:14px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;cursor:pointer;font-family:inherit;transition:all .2s;margin-top:1rem;text-decoration:none;text-align:center}
+.btn:hover:not(:disabled){background:#8b5e3c}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-secondary{background:#c9956a}
+.btn-secondary:hover:not(:disabled){background:#8b5e3c}
+.progress{margin-top:2rem;display:none}
+.progress.active{display:block}
+.log{background:#1a1410;color:#e8d9c4;padding:1.25rem;border-radius:8px;font-family:'SF Mono',Monaco,monospace;font-size:12px;line-height:1.6;max-height:400px;overflow-y:auto;white-space:pre-wrap}
+.log .ok{color:#5fb88c}.log .err{color:#ed7c70}.log .info{color:#7eb6ed}.log .sys{color:rgba(255,255,255,.5)}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite;margin-right:.5rem;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+.success{display:none;background:rgba(61,122,92,.08);border:1px solid rgba(61,122,92,.3);padding:1.5rem;border-radius:8px;margin-top:1.5rem}
+.success.active{display:block}
+.success h3{color:#3d7a5c;margin-bottom:.75rem}
+.error{display:none;background:rgba(192,57,43,.08);border:1px solid rgba(192,57,43,.3);padding:1.25rem;border-radius:8px;margin-top:1.5rem;color:#c0392b}
+.error.active{display:block}
+.next-steps{margin-top:1rem;padding:1.25rem;background:#f5f0e8;border-radius:8px}
+.next-steps h4{font-family:'Cormorant Garamond',serif;font-weight:500;margin-bottom:.5rem;color:#1a1410}
+.next-steps p,.next-steps ol{color:#5a4f47;font-size:14px;line-height:1.7}
+.next-steps a{color:#8b5e3c;border-bottom:1px solid currentColor;text-decoration:none}
+</style></head><body>
+<div class="wrap"><div class="card">
+  <div class="logo">ZORASKIN</div>
+  <div class="subtitle">Shop Setup · Vollautomatisch</div>
+  <h2>Bereit, deinen Shop fertigzustellen?</h2>
+  <p>Dieser Knopf erledigt in einem Schritt:</p>
+  <ul class="task-list">
+    <li>6 Smart Collections (Bestsellers, Skincare Tools, LED Therapy, Daily Rituals, New Arrivals, EU Fast Shipping)</li>
+    <li>6 Pflichtseiten (About, Contact, Shipping, Returns, FAQ, Imprint) mit fertigem Text</li>
+    <li>4 Navigation Menus (Header + 3 Footer-Spalten)</li>
+    <li>Theme-Farben und Layout setzen</li>
+  </ul>
+  <p style="font-size:13px;color:#8a7d72">Dauer: ca. 30 Sekunden. Mehrfach klicken erlaubt — bestehende Inhalte werden aktualisiert, nicht doppelt angelegt.</p>
+  <button class="btn" id="run-btn" onclick="runSetup()">▸ Setup jetzt starten</button>
+  <div class="progress" id="progress">
+    <p style="font-size:13px;color:#8a7d72;margin-bottom:.75rem"><span class="spinner" id="spinner"></span><span id="status">Setup läuft …</span></p>
+    <div class="log" id="log"></div>
+  </div>
+  <div class="success" id="success">
+    <h3>✓ Setup abgeschlossen</h3>
+    <p style="color:#5a4f47;font-size:14px">Dein Shop ist befüllt. Damit alles live geht, machst du jetzt noch <strong>3 letzte Klicks</strong> im Shopify Admin:</p>
+    <div class="next-steps">
+      <h4>Klick 1 — Theme aktivieren</h4>
+      <p><a href="https://${CONFIG.SHOPIFY_DOMAIN}/admin/themes" target="_blank">Online Store → Themes</a> → bei <strong>ZoraSkin</strong> → Actions → <strong>Publish</strong></p>
+    </div>
+    <div class="next-steps" style="margin-top:.75rem">
+      <h4>Klick 2 — Hero-Bild hochladen</h4>
+      <p>Themes → ZoraSkin → <strong>Customize</strong> → Hero Section → Background image (2400×1200 JPG)</p>
+    </div>
+    <div class="next-steps" style="margin-top:.75rem">
+      <h4>Klick 3 — Impressum-Daten ergänzen</h4>
+      <p><a href="https://${CONFIG.SHOPIFY_DOMAIN}/admin/pages" target="_blank">Pages</a> → <strong>Imprint</strong> → echte Adresse/Telefon/UID statt Platzhalter eintragen</p>
+    </div>
+    <a href="https://${CONFIG.SHOPIFY_DOMAIN}/admin" target="_blank"><div class="btn btn-secondary">Zum Shopify Admin</div></a>
+  </div>
+  <div class="error" id="error"></div>
+</div></div>
+<script>
+async function runSetup(){
+  const btn=document.getElementById('run-btn');
+  const prog=document.getElementById('progress');
+  const logEl=document.getElementById('log');
+  const status=document.getElementById('status');
+  const spinner=document.getElementById('spinner');
+  const success=document.getElementById('success');
+  const error=document.getElementById('error');
+  btn.disabled=true;btn.textContent='Setup läuft…';
+  prog.classList.add('active');
+  success.classList.remove('active');
+  error.classList.remove('active');
+  logEl.innerHTML='';
+  try{
+    const r=await fetch('/api/shop/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const data=await r.json();
+    (data.log||[]).forEach(entry=>{
+      const time=new Date(entry.time).toLocaleTimeString();
+      const line=document.createElement('div');
+      line.innerHTML='<span style="color:rgba(255,255,255,.4)">'+time+'</span>  <span class="'+entry.type+'">'+entry.msg+'</span>';
+      logEl.appendChild(line);
+    });
+    logEl.scrollTop=logEl.scrollHeight;
+    if(data.success){
+      spinner.style.display='none';
+      status.textContent='✓ Fertig — '+data.collections+' Collections · '+data.pages+' Pages · '+data.menus+' Menus';
+      success.classList.add('active');
+      btn.textContent='✓ Setup erledigt — nochmal ausführen';
+      btn.disabled=false;
+    }else{
+      spinner.style.display='none';
+      status.textContent='✗ Fehler beim Setup';
+      error.classList.add('active');
+      error.innerHTML='<strong>Fehler:</strong> '+(data.error||'Unbekannter Fehler')+'<br><br>Bitte den Log oben prüfen.';
+      btn.textContent='Erneut versuchen';
+      btn.disabled=false;
+    }
+  }catch(e){
+    spinner.style.display='none';
+    status.textContent='✗ Netzwerk-Fehler';
+    error.classList.add('active');
+    error.innerHTML='<strong>Fehler:</strong> '+e.message;
+    btn.textContent='Erneut versuchen';
+    btn.disabled=false;
+  }
+}
+</script></body></html>`);
+});
+
+// ╚══════════════════════════════════════════════════════════════════╝
+// ║  ENDE Setup-Block — Original v8.4 PORT/listen folgt unverändert  ║
+// ╚══════════════════════════════════════════════════════════════════╝
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`ZoraSkin Backend v8.4 auf Port ${PORT}`));
