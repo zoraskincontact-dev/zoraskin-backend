@@ -1529,7 +1529,7 @@ const SETUP_COLLECTIONS = [
       { column: 'title', relation: 'contains', condition: 'roller' },
       { column: 'title', relation: 'contains', condition: 'massager' },
       { column: 'title', relation: 'contains', condition: 'globe' },
-      { column: 'tag', relation: 'contains', condition: 'tool' }
+      { column: 'tag', relation: 'equals', condition: 'Skincare Tools' }
     ], disjunctive: true, sort_order: 'best-selling' },
   { title: 'LED Therapy', handle: 'led-therapy',
     body_html: '<p>Red light, blue light, infrared. Clinical-grade devices for at-home treatment.</p>',
@@ -1537,7 +1537,7 @@ const SETUP_COLLECTIONS = [
       { column: 'title', relation: 'contains', condition: 'led' },
       { column: 'title', relation: 'contains', condition: 'light therapy' },
       { column: 'title', relation: 'contains', condition: 'red light' },
-      { column: 'tag', relation: 'contains', condition: 'led' }
+      { column: 'tag', relation: 'equals', condition: 'LED Therapy' }
     ], disjunctive: true, sort_order: 'best-selling' },
   { title: 'Daily Rituals', handle: 'daily-rituals',
     body_html: '<p>Cleansers, serums, masks, and creams. The everyday essentials.</p>',
