@@ -1510,24 +1510,22 @@ app.get('/api/audit/duplicates', async (req, res) => {
 });
 
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  ZORASKIN SHOP SETUP — v3.0                                      ║
-// ║  Tier 1+2-konform · 4 Hauptkategorien · ehrliche Pages           ║
+// ║  ZORASKIN SHOP SETUP — v3.1 FINAL                                 ║
+// ║  Tier 1+2 · EU+CH only · Cream/Espresso/Sage · keine Kulanz       ║
 // ║  Aufruf:  GET  /setup            → Browser-Seite mit Knopf       ║
 // ║           POST /api/shop/setup   → führt Setup durch             ║
 // ║  Nutzt bestehende Helper aus v8.4 (getShopifyToken, CONFIG)      ║
 // ╚══════════════════════════════════════════════════════════════════╝
 
-// Alte Collection-Handles, die gelöscht werden sollen (aus früheren Setup-Versuchen)
 const OBSOLETE_COLLECTION_HANDLES = [
   'bestsellers', 'skincare-tools', 'led-therapy', 'daily-rituals',
   'new-arrivals', 'eu-fast-shipping'
 ];
 
-// 4 Hauptkategorien (Hub-Collections — Smart Collection mit OR über alle Sub-Tags)
 const SETUP_HUBS = [
   {
     title: 'Tools', handle: 'tools',
-    body_html: '<p>Hand-crafted beauty tools — gua sha, rollers, brushes, and more. Every tool we curate is mechanical, no electronics, no formulas.</p>',
+    body_html: '<p>Hand-finished beauty tools. Stone, wood, and metal — no electronics, no formulas.</p>',
     subTags: ['Facial Tools','Body Tools','Hair Tools','Eyelash & Brow','Nail & Hand','Makeup Tools']
   },
   {
@@ -1547,7 +1545,6 @@ const SETUP_HUBS = [
   }
 ];
 
-// 24 Sub-Collections (Smart Collection mit `tag equals <name>`)
 const SETUP_SUB_COLLECTIONS = [
   // Tools
   { title: 'Facial Tools',     handle: 'facial-tools',     parent: 'tools',       body_html: '<p>Gua sha, rollers, cryo globes — manual tools for the face.</p>' },
@@ -1575,11 +1572,11 @@ const SETUP_SUB_COLLECTIONS = [
   { title: 'Acupressure',      handle: 'acupressure',      parent: 'wellness',    body_html: '<p>Acupressure mats, pillows, rings.</p>' }
 ];
 
-// Pages — ehrliche, durchgängig englische Texte, keine Health-Claims, klares Curated-Retailer-Modell
+// Pages — alle final, EU+CH only, ehrlich, keine Kulanz-Refunds
 const SETUP_PAGES = [
   {
     handle: 'about', title: 'About ZoraSkin',
-    body_html: '<p><em>ZoraSkin is an independent retailer of curated beauty tools and accessories.</em></p><p>We source mechanical beauty objects — gua sha boards, hair brushes, vanity trays, silk pillowcases — from international makers and bring them to you under one roof. We don\'t formulate creams. We don\'t manufacture devices. What we do is curate.</p><h3>What we sell</h3><ul><li>Hand-finished tools made from stone, wood, glass, and metal</li><li>Soft textiles for sleep and bath rituals</li><li>Storage and organization for your beauty space</li><li>Wellness accessories — aromatherapy hardware, acupressure, hand strengthening</li></ul><h3>What we don\'t sell</h3><ul><li>Creams, serums, oils, or anything with active ingredients</li><li>Electric devices for skin treatment</li><li>Anything claiming to cure, heal, or treat a condition</li></ul><p>This is intentional. We focus on what we can stand behind — well-made objects that support a daily ritual, without medical promises we can\'t verify.</p><h3>Where we ship from</h3><p>Our products ship from international warehouses, primarily Asia and Europe. Allow 2–3 weeks for delivery in most regions. EU and UK orders typically arrive faster from our European warehouse.</p><h3>Get in touch</h3><p>Questions? Press? Wholesale? <em>zoraskin.contact@gmail.com</em></p>'
+    body_html: '<p><em>ZoraSkin is an independent retailer of curated beauty tools and accessories.</em></p><p>We source mechanical beauty objects — gua sha boards, hair brushes, vanity trays, silk pillowcases — from international makers and bring them to you under one roof. We don\'t formulate creams. We don\'t manufacture devices. What we do is curate.</p><h3>What we sell</h3><ul><li>Hand-finished tools made from stone, wood, glass, and metal</li><li>Soft textiles for sleep and bath rituals</li><li>Storage and organization for your beauty space</li><li>Wellness accessories — aromatherapy hardware, acupressure, hand strengthening</li></ul><h3>What we don\'t sell</h3><ul><li>Creams, serums, oils, or anything with active ingredients</li><li>Electric devices for skin treatment</li><li>Anything claiming to cure, heal, or treat a condition</li></ul><p>This is intentional. We focus on what we can stand behind — well-made objects that support a daily ritual, without medical promises we can\'t verify.</p><h3>Where we ship</h3><p>We ship to the European Union, the United Kingdom, and Switzerland. Products dispatch from international warehouses — primarily Asia and our European warehouse for EU/UK orders. Allow 7–18 business days depending on your region.</p><h3>Get in touch</h3><p>Questions? Press? Wholesale? <em>zoraskin.contact@gmail.com</em></p>'
   },
   {
     handle: 'contact', title: 'Contact us',
@@ -1587,15 +1584,15 @@ const SETUP_PAGES = [
   },
   {
     handle: 'shipping', title: 'Shipping',
-    body_html: '<h3>Shipping rates</h3><ul><li><strong>Free</strong> on orders over $50, anywhere in the world</li><li><strong>$4.99</strong> flat rate, under $50</li></ul><h3>Delivery times</h3><ul><li><strong>EU &amp; UK</strong> — 7–14 business days, often faster from our European warehouse</li><li><strong>USA &amp; Canada</strong> — 10–18 business days</li><li><strong>Rest of world</strong> — 14–21 business days</li></ul><p><em>We ship from international warehouses. Each product page shows the expected delivery window.</em></p><h3>Tracking</h3><p>You\'ll get a tracking link by email when your order ships. Check your spam folder if you don\'t see it within an hour.</p><h3>Customs &amp; duties</h3><p>For orders shipped outside their warehouse region, any import duties or taxes are the recipient\'s responsibility. These are typically low for personal accessories.</p><h3>Delays</h3><p>International shipping has occasional delays. If your order hasn\'t arrived within 30 days of order, contact us — we\'ll either resend or refund.</p>'
+    body_html: '<h3>Where we ship</h3><p>We ship to the European Union, the United Kingdom, and Switzerland. We do not currently ship outside these regions.</p><h3>Shipping rates</h3><ul><li><strong>Free</strong> on orders over €50 / CHF 50</li><li><strong>€4.99 / CHF 4.99</strong> flat rate, under €50 / CHF 50</li></ul><h3>Delivery times</h3><ul><li><strong>EU &amp; UK</strong> — 7–14 business days, often faster from our European warehouse</li><li><strong>Switzerland</strong> — 10–18 business days (customs adds time)</li></ul><p><em>Each product page shows the expected delivery window.</em></p><h3>Tracking</h3><p>You\'ll get a tracking link by email when your order ships. Check your spam folder if you don\'t see it within an hour.</p><h3>Customs &amp; duties</h3><p>Swiss customers may incur import VAT and customs fees on delivery. These are set by Swiss customs and are the recipient\'s responsibility. EU and UK orders ship duty-paid where possible.</p><h3>Delays</h3><p>International shipping has occasional delays. If your order hasn\'t arrived within 30 days of order, contact us — we\'ll resend or refund.</p>'
   },
   {
-    handle: 'returns', title: 'Returns &amp; refunds',
-    body_html: '<h3>30-day satisfaction promise</h3><p>If you\'re not happy with your purchase, contact us within 30 days. We\'ll issue a full refund — no return shipping required.</p><p><em>That\'s right: keep the product or pass it on to a friend. We\'d rather refund you than have you ship internationally.</em></p><h3>How to request a refund</h3><ol><li>Email <em>zoraskin.contact@gmail.com</em> within 30 days of delivery</li><li>Include your order number and a brief reason</li><li>We respond within one business day</li><li>Refund processed within 5 business days</li></ol><h3>Damaged or wrong items</h3><p>Send us a photo. We\'ll send a replacement at no cost — no need to return the original.</p><h3>EU customers — right of withdrawal</h3><p>Per EU consumer law, you have a 14-day right of withdrawal from receipt of goods, no reason required. Our 30-day policy extends this further at our discretion.</p><h3>Why no returns?</h3><p>Honest answer: we ship from international warehouses, and return shipping would cost more than most products. Refunding you directly is faster, fairer, and less wasteful.</p>'
+    handle: 'order-issues', title: 'Order issues',
+    body_html: '<p>If something has gone wrong with your order, here\'s what we cover and how to reach us.</p><h3>Damaged or wrong items</h3><p>If your order arrives damaged, defective, or you receive the wrong item — we\'ll refund or replace at no cost. Email <em>zoraskin.contact@gmail.com</em> with your order number and a photo of the issue. We respond within one business day.</p><h3>Order didn\'t arrive</h3><p>If your tracking shows no movement for 21+ days or the package is marked lost, we\'ll resend or refund. Contact us with your order number.</p><h3>EU customers — 14-day right of withdrawal</h3><p>Per EU consumer law (Directive 2011/83/EU), customers in the European Union have the right to withdraw from a purchase within 14 days of receiving the goods, without giving a reason. To exercise this right, email <em>zoraskin.contact@gmail.com</em> within 14 days of delivery. Items must be unused and in original condition. Return shipping cost is the customer\'s responsibility.</p><h3>Swiss customers — statutory warranty</h3><p>Per Swiss Code of Obligations (Art. 197 ff.), you have a 2-year warranty on goods sold. If a product is defective on arrival, we replace or refund.</p><h3>What we don\'t cover</h3><p>Outside of damaged, defective, wrong, or lost items — and outside the EU statutory withdrawal window — we cannot offer refunds or returns. International return shipping is impractical for the products we sell, and our prices reflect that.</p><p>Please review product photos, dimensions, and descriptions carefully before ordering.</p><h3>Contact</h3><p><em>zoraskin.contact@gmail.com</em></p>'
   },
   {
     handle: 'faq', title: 'Frequently asked questions',
-    body_html: '<h3>Where do products ship from?</h3><p>International warehouses, primarily Asia and Europe. Most EU and UK orders ship from our European warehouse for faster delivery.</p><h3>Why is delivery so long?</h3><p>We ship from international warehouses to keep prices low. Allow 7–21 business days depending on your region. Faster shipping isn\'t available on this catalogue — for express delivery, larger retailers like Notino or Amazon are better suited.</p><h3>Are you the manufacturer?</h3><p>No. We\'re an independent retailer that curates beauty tools and accessories from international makers. Manufacturing details are on each product page where available.</p><h3>What materials are your gua sha tools made of?</h3><p>Genuine semi-precious stones — rose quartz, jade, amethyst, obsidian, and bian stone. We don\'t use plastic substitutes.</p><h3>How do I clean my gua sha or roller?</h3><p>Warm water and gentle soap after each use. Pat dry. Avoid harsh chemicals or hard surfaces — these are stones, they can chip.</p><h3>Do your tools have health benefits?</h3><p>We don\'t make medical claims. Gua sha and rollers are traditional tools used for daily face and body massage routines. Whether you find them beneficial is your experience to discover.</p><h3>Why don\'t you sell creams or serums?</h3><p>Cosmetic products with active ingredients require regulatory compliance (CPNP, ingredient testing, responsible-person registration) that\'s not realistic for a small independent retailer. We focus on what we can stand behind.</p><h3>Why no electric devices?</h3><p>Electric beauty devices that touch the skin require certification (CE, EMC, sometimes medical-device approval). Our catalogue is mechanical only — no batteries, no plugs, no health claims.</p><h3>Can I cancel my order?</h3><p>If your order hasn\'t shipped yet — yes. Email us within 12 hours of ordering. Once shipped, request a refund instead.</p><h3>Do you offer subscriptions or bundles?</h3><p>Bundles, yes — see individual product pages. Subscriptions, not yet.</p>'
+    body_html: '<h3>Where do products ship from?</h3><p>International warehouses, primarily Asia and our European warehouse. Most EU and UK orders ship from Europe for faster delivery.</p><h3>Do you ship outside EU, UK, or Switzerland?</h3><p>Not currently. We focus on EU, UK, and Swiss customers.</p><h3>Why is delivery so long?</h3><p>We ship from international warehouses to keep prices low. Allow 7–18 business days depending on your region. Faster shipping isn\'t available on this catalogue — for express delivery, larger retailers like Notino are better suited.</p><h3>Are you the manufacturer?</h3><p>No. We\'re an independent retailer that curates beauty tools and accessories from international makers. Manufacturing details are on each product page where available.</p><h3>What materials are your gua sha tools made of?</h3><p>Genuine semi-precious stones — rose quartz, jade, amethyst, obsidian, and bian stone. We don\'t use plastic substitutes.</p><h3>How do I clean my gua sha or roller?</h3><p>Warm water and gentle soap after each use. Pat dry. Avoid harsh chemicals or hard surfaces — these are stones, they can chip.</p><h3>Do your tools have health benefits?</h3><p>We don\'t make medical claims. Gua sha and rollers are traditional tools used for daily face and body massage routines. Whether you find them beneficial is your experience to discover.</p><h3>Why don\'t you sell creams or serums?</h3><p>Cosmetic products with active ingredients require regulatory compliance (CPNP, ingredient testing, responsible-person registration in the EU) that\'s not realistic for a small independent retailer. We focus on what we can stand behind.</p><h3>Why no electric devices?</h3><p>Electric beauty devices that touch the skin require certification (CE, EMC, sometimes medical-device approval). Our catalogue is mechanical only — no batteries, no plugs, no health claims.</p><h3>Can I cancel my order?</h3><p>If your order hasn\'t shipped yet — yes. Email us within 12 hours of ordering. Once shipped, refer to our <a href="/pages/order-issues">order issues</a> page.</p><h3>Do you offer subscriptions or bundles?</h3><p>Bundles, yes — see individual product pages. Subscriptions, not yet.</p>'
   },
   {
     handle: 'imprint', title: 'Imprint',
@@ -1603,7 +1600,6 @@ const SETUP_PAGES = [
   }
 ];
 
-// GraphQL Helper
 async function setupShopifyGraphQL(query, variables = {}) {
   const token = await getShopifyToken();
   const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/graphql.json`, {
@@ -1616,7 +1612,6 @@ async function setupShopifyGraphQL(query, variables = {}) {
   return data.data;
 }
 
-// REST Helper
 async function setupShopifyREST(path, options = {}) {
   const token = await getShopifyToken();
   const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}${path}`, {
@@ -1635,7 +1630,7 @@ app.post('/api/shop/setup', async (req, res) => {
   const L = (msg, type = 'info') => { log.push({ msg, type, time: new Date().toISOString() }); console.log(`[setup:${type}] ${msg}`); };
 
   try {
-    L('Setup v3.0 gestartet — Tier 1+2-Struktur', 'sys');
+    L('Setup v3.1 FINAL gestartet', 'sys');
     await getShopifyToken();
     L('Shopify-Auth OK', 'ok');
 
@@ -1647,7 +1642,7 @@ app.post('/api/shop/setup', async (req, res) => {
     if (!theme) throw new Error('Theme "ZoraSkin" nicht gefunden.');
     L(`Theme: "${theme.name}" (Role: ${theme.role})`, 'ok');
 
-    // STEP 1: ALTE Collections löschen (Cleanup)
+    // STEP 1: ALTE Collections löschen
     const allOldCollections = (await setupShopifyREST('/smart_collections.json?limit=250')).smart_collections;
     let cleanupCount = 0;
     for (const oldHandle of OBSOLETE_COLLECTION_HANDLES) {
@@ -1665,7 +1660,7 @@ app.post('/api/shop/setup', async (req, res) => {
     }
     L(`Cleanup: ${cleanupCount} alte Collections entfernt`, 'info');
 
-    // STEP 2: Sub-Collections anlegen (24 Stück, Smart per Tag)
+    // STEP 2: Sub-Collections
     const allCollections = (await setupShopifyREST('/smart_collections.json?limit=250')).smart_collections;
     const subCols = [];
     for (const def of SETUP_SUB_COLLECTIONS) {
@@ -1690,13 +1685,12 @@ app.post('/api/shop/setup', async (req, res) => {
       await new Promise(r => setTimeout(r, 350));
     }
 
-    // STEP 3: Hub-Collections anlegen (4 Stück, Smart per OR über Sub-Tags)
+    // STEP 3: Hub-Collections
     const hubs = [];
     for (const def of SETUP_HUBS) {
       const found = allCollections.find(c => c.handle === def.handle);
       const rules = def.subTags.map(t => ({ column: 'tag', relation: 'equals', condition: t }));
       if (found) {
-        // Update rules
         try {
           await setupShopifyREST(`/smart_collections/${found.id}.json`, {
             method: 'PUT',
@@ -1728,11 +1722,22 @@ app.post('/api/shop/setup', async (req, res) => {
       await new Promise(r => setTimeout(r, 400));
     }
 
-    // STEP 4: Pages
+    // STEP 4: Pages — vorher alte "returns"-Page löschen falls vorhanden
     const existingPages = (await setupShopifyREST('/pages.json?limit=250')).pages;
+    const oldReturnsPage = existingPages.find(p => p.handle === 'returns');
+    if (oldReturnsPage) {
+      try {
+        await setupShopifyREST(`/pages/${oldReturnsPage.id}.json`, { method: 'DELETE' });
+        L('Alte "Returns"-Page gelöscht (ersetzt durch "Order issues")', 'ok');
+      } catch (e) {
+        L(`Konnte alte Returns-Page nicht löschen: ${e.message.slice(0,100)}`, 'warn');
+      }
+    }
+
+    const pagesAfterCleanup = (await setupShopifyREST('/pages.json?limit=250')).pages;
     const pages = [];
     for (const def of SETUP_PAGES) {
-      const found = existingPages.find(p => p.handle === def.handle);
+      const found = pagesAfterCleanup.find(p => p.handle === def.handle);
       if (found) {
         await setupShopifyREST(`/pages/${found.id}.json`, {
           method: 'PUT',
@@ -1751,9 +1756,8 @@ app.post('/api/shop/setup', async (req, res) => {
       await new Promise(r => setTimeout(r, 400));
     }
 
-    // STEP 5: Menus — Main + 3 Footer
+    // STEP 5: Menus — Order issues statt Returns
     const hubByHandle = Object.fromEntries(hubs.map(h => [h.handle, h]));
-    const subByHandle = Object.fromEntries(subCols.map(s => [s.handle, s]));
     const pageByHandle = Object.fromEntries(pages.map(p => [p.handle, p]));
 
     const MENUS = [
@@ -1772,10 +1776,10 @@ app.post('/api/shop/setup', async (req, res) => {
         { title: 'All products',type: 'HTTP',                                                    url: '/collections/all' }
       ]},
       { title: 'Footer Service', handle: 'footer-support', items: [
-        { title: 'Contact us',  type: 'PAGE', resourceId: pageByHandle['contact']?.gid,  url: '/pages/contact' },
-        { title: 'Shipping',    type: 'PAGE', resourceId: pageByHandle['shipping']?.gid, url: '/pages/shipping' },
-        { title: 'Returns',     type: 'PAGE', resourceId: pageByHandle['returns']?.gid,  url: '/pages/returns' },
-        { title: 'FAQ',         type: 'PAGE', resourceId: pageByHandle['faq']?.gid,      url: '/pages/faq' }
+        { title: 'Contact us',   type: 'PAGE', resourceId: pageByHandle['contact']?.gid,       url: '/pages/contact' },
+        { title: 'Shipping',     type: 'PAGE', resourceId: pageByHandle['shipping']?.gid,      url: '/pages/shipping' },
+        { title: 'Order issues', type: 'PAGE', resourceId: pageByHandle['order-issues']?.gid, url: '/pages/order-issues' },
+        { title: 'FAQ',          type: 'PAGE', resourceId: pageByHandle['faq']?.gid,           url: '/pages/faq' }
       ]},
       { title: 'Footer Company', handle: 'footer-company', items: [
         { title: 'About',           type: 'PAGE', resourceId: pageByHandle['about']?.gid,    url: '/pages/about' },
@@ -1835,16 +1839,16 @@ app.post('/api/shop/setup', async (req, res) => {
     });
     L('Theme-Settings gesetzt', 'ok');
 
-    // STEP 7: Homepage-Template patchen mit Hub-Collection-Tiles
+    // STEP 7: Homepage — Hero auf data-text="dark" (Cream BG, Espresso Text, Sage Akzent)
     const indexJson = {
       sections: {
         "hero": {
           type: "hero",
           settings: {
-            text_color: "light",
+            text_color: "dark",
             eyebrow: "Curated beauty",
             heading: "Tools, <em>refined.</em>",
-            text: "Hand-crafted beauty objects for the daily ritual. Stone, wood, silk — no formulas, no electronics, just the essentials.",
+            text: "Hand-finished beauty objects for the daily ritual. Stone, wood, silk — no formulas, no electronics, just the essentials.",
             button_label: "Shop tools",
             button_url: "/collections/tools",
             button2_label: "Read our story",
@@ -1854,8 +1858,8 @@ app.post('/api/shop/setup', async (req, res) => {
         "trust-bar": {
           type: "trust-bar",
           blocks: {
-            "shipping": { type: "item", settings: { icon: "shipping", title: "Free over $50", text: "Worldwide shipping" } },
-            "returns":  { type: "item", settings: { icon: "returns",  title: "30-day refunds", text: "No return shipping needed" } },
+            "shipping": { type: "item", settings: { icon: "shipping", title: "Free over €50", text: "Across EU, UK and Switzerland" } },
+            "returns":  { type: "item", settings: { icon: "shield",   title: "Buyer protection", text: "Damaged or wrong? We refund." } },
             "leaf":     { type: "item", settings: { icon: "leaf",     title: "Curated", text: "Hand-picked from international makers" } },
             "star":     { type: "item", settings: { icon: "star",     title: "Independent", text: "Small retailer, real responses" } }
           },
@@ -1912,12 +1916,104 @@ app.post('/api/shop/setup', async (req, res) => {
         method: 'PUT',
         body: JSON.stringify({ asset: { key: 'templates/index.json', value: JSON.stringify(indexJson, null, 2) } })
       });
-      L('Homepage-Template gepatcht', 'ok');
+      L('Homepage-Template gepatcht (Hero: Cream/Espresso/Sage)', 'ok');
     } catch(e) {
       L(`Template-Patch Warnung: ${e.message.slice(0,150)}`, 'warn');
     }
 
-    // STEP 8: Header-Section patchen
+    // STEP 8: Hero-Section — Sage statt Gold für Akzent-Italic
+    const newHeroLiquid = `<section class="hero" data-text="{{ section.settings.text_color }}">
+  {%- if section.settings.image != blank -%}
+    <div class="hero-image">
+      <img
+        src="{{ section.settings.image | image_url: width: 2400 }}"
+        alt="{{ section.settings.heading | escape }}"
+        loading="eager"
+        fetchpriority="high"
+        width="{{ section.settings.image.width }}"
+        height="{{ section.settings.image.height }}">
+    </div>
+  {%- else -%}
+    <div class="hero-image" style="background:linear-gradient(135deg, #faf6f0 0%, #f5f0e8 100%);"></div>
+  {%- endif -%}
+
+  <div class="container">
+    <div class="hero-content" data-reveal>
+      {%- if section.settings.eyebrow != blank -%}
+        <span class="hero-eyebrow" style="color: {% if section.settings.text_color == 'dark' %}#5a4f47{% else %}rgba(255,255,255,.85){% endif %};">{{ section.settings.eyebrow }}</span>
+      {%- endif -%}
+      {%- if section.settings.heading != blank -%}
+        <h1 class="hero-title" style="color: {% if section.settings.text_color == 'dark' %}#1a1410{% else %}#fff{% endif %};">{{ section.settings.heading }}</h1>
+      {%- endif -%}
+      {%- if section.settings.text != blank -%}
+        <p class="hero-text" style="color: {% if section.settings.text_color == 'dark' %}#5a4f47{% else %}rgba(255,255,255,.92){% endif %};">{{ section.settings.text }}</p>
+      {%- endif -%}
+      <div class="hero-actions">
+        {%- if section.settings.button_label != blank -%}
+          <a href="{{ section.settings.button_url | default: '#' }}" class="btn {% if section.settings.text_color == 'dark' %}btn-primary{% else %}btn-accent{% endif %}">
+            {{ section.settings.button_label }}
+          </a>
+        {%- endif -%}
+        {%- if section.settings.button2_label != blank -%}
+          <a href="{{ section.settings.button2_url | default: '#' }}" class="btn btn-outline">
+            {{ section.settings.button2_label }}
+          </a>
+        {%- endif -%}
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+.hero[data-text="dark"] .hero-title em {
+  color: #3d7a5c !important;
+  font-style: italic;
+}
+.hero[data-text="light"] .hero-title em {
+  color: #d4a853 !important;
+  font-style: italic;
+}
+.hero[data-text="dark"] .hero-image::after {
+  display: none !important;
+}
+</style>
+
+{% schema %}
+{
+  "name": "Hero",
+  "settings": [
+    { "type": "image_picker", "id": "image", "label": "Background image (optional — leave empty for cream gradient)" },
+    {
+      "type": "select", "id": "text_color", "label": "Text color",
+      "options": [
+        { "value": "light", "label": "Light (white text on dark image)" },
+        { "value": "dark",  "label": "Dark (dark text on cream/light)" }
+      ],
+      "default": "dark"
+    },
+    { "type": "text", "id": "eyebrow", "label": "Eyebrow", "default": "Curated beauty" },
+    { "type": "text", "id": "heading", "label": "Heading", "default": "Tools, <em>refined.</em>" },
+    { "type": "textarea", "id": "text", "label": "Subtext", "default": "Hand-finished beauty objects for the daily ritual." },
+    { "type": "text", "id": "button_label", "label": "Primary button", "default": "Shop tools" },
+    { "type": "url", "id": "button_url", "label": "Primary button link" },
+    { "type": "text", "id": "button2_label", "label": "Secondary button", "default": "Read our story" },
+    { "type": "url", "id": "button2_url", "label": "Secondary button link" }
+  ],
+  "presets": [{ "name": "Hero" }]
+}
+{% endschema %}
+`;
+    try {
+      await setupShopifyREST(`/themes/${theme.id}/assets.json`, {
+        method: 'PUT',
+        body: JSON.stringify({ asset: { key: 'sections/hero.liquid', value: newHeroLiquid } })
+      });
+      L('Hero-Section gepatcht (Cream BG, Espresso Text, Sage italic)', 'ok');
+    } catch(e) {
+      L(`Hero-Patch Warnung: ${e.message.slice(0,150)}`, 'warn');
+    }
+
+    // STEP 9: Header-Section
     const newHeaderLiquid = `<header class="site-header">
   <div class="container">
     <button class="menu-toggle" data-menu-toggle aria-label="Open menu" aria-expanded="false">
@@ -1955,7 +2051,7 @@ app.post('/api/shop/setup', async (req, res) => {
 {
   "name": "Header",
   "settings": [
-    { "type": "image_picker", "id": "logo", "label": "Logo image (recommended height: 80–120 px, transparent PNG/SVG)" },
+    { "type": "image_picker", "id": "logo", "label": "Logo image (transparent PNG, recommended height 80–120 px)" },
     { "type": "link_list", "id": "menu", "default": "main-menu", "label": "Menu" }
   ],
   "presets": [{ "name": "Header" }]
@@ -1972,7 +2068,7 @@ app.post('/api/shop/setup', async (req, res) => {
       L(`Header-Patch Warnung: ${e.message.slice(0,150)}`, 'warn');
     }
 
-    L('=== SETUP v3.0 ABGESCHLOSSEN ===', 'ok');
+    L('=== SETUP v3.1 FINAL ABGESCHLOSSEN ===', 'ok');
     res.json({
       success: true,
       hubs: hubs.length,
@@ -1990,11 +2086,10 @@ app.post('/api/shop/setup', async (req, res) => {
   }
 });
 
-// HTML-Setup-Seite
 app.get('/setup', (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`<!DOCTYPE html>
-<html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ZoraSkin Setup v3</title>
+<html lang="de"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ZoraSkin Setup v3.1</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -2009,10 +2104,9 @@ p{color:#5a4f47;line-height:1.65;margin-bottom:1rem}
 .task-list li{padding:.65rem 0 .65rem 1.85rem;position:relative;color:#5a4f47;font-size:14px}
 .task-list li::before{content:'✓';position:absolute;left:0;color:#3d7a5c;font-weight:700}
 .btn{display:block;width:100%;padding:1.1rem 2rem;background:#1a1410;color:#fff;border:0;border-radius:6px;font-size:14px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;cursor:pointer;font-family:inherit;transition:all .2s;margin-top:1rem;text-decoration:none;text-align:center}
-.btn:hover:not(:disabled){background:#8b5e3c}
+.btn:hover:not(:disabled){background:#3d7a5c}
 .btn:disabled{opacity:.5;cursor:not-allowed}
-.btn-secondary{background:#c9956a}
-.btn-secondary:hover:not(:disabled){background:#8b5e3c}
+.btn-secondary{background:#3d7a5c}
 .warn-box{background:#fef3c7;border:1px solid #f59e0b;color:#92400e;padding:1rem 1.25rem;border-radius:8px;margin:1.5rem 0;font-size:14px;line-height:1.6}
 .progress{margin-top:2rem;display:none}
 .progress.active{display:block}
@@ -2028,47 +2122,48 @@ p{color:#5a4f47;line-height:1.65;margin-bottom:1rem}
 .next-steps{margin-top:1rem;padding:1.25rem;background:#f5f0e8;border-radius:8px}
 .next-steps h4{font-family:'Cormorant Garamond',serif;font-weight:500;margin-bottom:.5rem;color:#1a1410}
 .next-steps p,.next-steps ol{color:#5a4f47;font-size:14px;line-height:1.7}
-.next-steps a{color:#8b5e3c;border-bottom:1px solid currentColor;text-decoration:none}
+.next-steps a{color:#3d7a5c;border-bottom:1px solid currentColor;text-decoration:none}
 </style></head><body>
 <div class="wrap"><div class="card">
   <div class="logo">ZORASKIN</div>
-  <div class="subtitle">Setup v3 · Tier 1+2 — Curated Tools</div>
-  <h2>Komplette Restrukturierung</h2>
-  <p>Dieser Setup-Lauf strukturiert deinen Shop neu nach dem Tier 1+2-Modell:</p>
+  <div class="subtitle">Setup v3.1 · Tier 1+2 · EU+CH</div>
+  <h2>Final-Restrukturierung</h2>
+  <p>Dieser Setup-Lauf strukturiert deinen Shop neu — final, alle deine Vorgaben drin:</p>
   <ul class="task-list">
-    <li>Alte Collections löschen (Bestsellers, Skincare Tools, LED, Daily Rituals, EU Fast Shipping)</li>
-    <li>4 neue Hauptkategorien anlegen (Tools, Textiles, Accessories, Wellness)</li>
-    <li>20 Sub-Collections anlegen, automatisch gefüllt nach Tags</li>
-    <li>6 Pflichtseiten neu schreiben (ehrlich, durchgängig englisch)</li>
-    <li>4 Navigation Menus aktualisieren</li>
-    <li>Homepage-Template &amp; Header patchen</li>
+    <li>4 Hauptkategorien · 20 Sub-Collections · 6 Pages</li>
+    <li>Hero in Cream + Espresso + Sage-Akzent (lesbar!)</li>
+    <li>Page "Order issues" statt "Returns" — keine Kulanz-Refunds</li>
+    <li>EU 14-Tage-Widerruf + CH Sachgewährleistung erwähnt</li>
+    <li>Versand nur EU/UK/CH</li>
+    <li>Alte Returns-Page wird gelöscht</li>
+    <li>Header &amp; Hero gepatcht</li>
   </ul>
   <div class="warn-box">
-    <strong>Wichtig:</strong> Vor diesem Lauf solltest du alle 75 bestehenden Produkte in Shopify gelöscht haben (Products → Alle markieren → Delete). Sonst bleiben sie ohne passende Collection im Shop hängen.
+    <strong>Wichtig:</strong> Vor diesem Lauf alle 75 bestehenden Produkte in Shopify gelöscht haben (Products → Alle markieren → Delete).
   </div>
-  <button class="btn" id="run-btn" onclick="runSetup()">▸ Setup v3 starten</button>
+  <button class="btn" id="run-btn" onclick="runSetup()">▸ Setup v3.1 starten</button>
   <div class="progress" id="progress">
     <p style="font-size:13px;color:#8a7d72;margin-bottom:.75rem"><span class="spinner" id="spinner"></span><span id="status">Setup läuft …</span></p>
     <div class="log" id="log"></div>
   </div>
   <div class="success" id="success">
-    <h3>✓ Setup v3 abgeschlossen</h3>
+    <h3>✓ Setup v3.1 abgeschlossen</h3>
     <p style="color:#5a4f47;font-size:14px">Struktur fertig. Jetzt machst du noch:</p>
     <div class="next-steps">
       <h4>Klick 1 — Theme aktivieren (falls noch nicht)</h4>
       <p><a href="https://${CONFIG.SHOPIFY_DOMAIN}/admin/themes" target="_blank">Online Store → Themes</a> → bei <strong>ZoraSkin</strong> → Actions → <strong>Publish</strong></p>
     </div>
     <div class="next-steps" style="margin-top:.75rem">
-      <h4>Klick 2 — Hero &amp; Tile-Bilder hochladen</h4>
-      <p><a href="https://${CONFIG.SHOPIFY_DOMAIN}/admin/themes/current/editor" target="_blank">Customize</a> → Hero (2400×1200) und 4 Collection-Tiles (je 800×1000)</p>
+      <h4>Klick 2 — Tile-Bilder hochladen (Hero kann leer bleiben)</h4>
+      <p><a href="https://${CONFIG.SHOPIFY_DOMAIN}/admin/themes/current/editor" target="_blank">Customize</a> → Collection-Tiles (4× 800×1000) für Tools/Textiles/Accessories/Wellness. Hero zeigt Cream-Gradient ohne Bild.</p>
     </div>
     <div class="next-steps" style="margin-top:.75rem">
       <h4>Klick 3 — Impressum-Daten ergänzen</h4>
       <p><a href="https://${CONFIG.SHOPIFY_DOMAIN}/admin/pages" target="_blank">Pages</a> → <strong>Imprint</strong> → echte Daten eintragen</p>
     </div>
     <div class="next-steps" style="margin-top:.75rem">
-      <h4>Klick 4 — Mit dem Agent neue Tier 1+2-Produkte importieren</h4>
-      <p>Backend filtert ab sofort automatisch — nur Tools/Textiles/Accessories/Wellness werden gefunden. LED, Cremes, Seren werden nicht mehr importiert.</p>
+      <h4>Klick 4 — Versand-Zonen einschränken</h4>
+      <p><a href="https://${CONFIG.SHOPIFY_DOMAIN}/admin/settings/shipping" target="_blank">Settings → Shipping</a> → Versand nur für EU + UK + Schweiz freischalten</p>
     </div>
     <a href="https://${CONFIG.SHOPIFY_DOMAIN}/admin" target="_blank"><div class="btn btn-secondary">Zum Shopify Admin</div></a>
   </div>
@@ -2125,7 +2220,7 @@ async function runSetup(){
 });
 
 // ╚══════════════════════════════════════════════════════════════════╝
-// ║  ENDE Setup-Block v3 — Original v8.4 PORT/listen folgt unverändert ║
+// ║  ENDE Setup-Block v3.1 FINAL — PORT/listen folgt unverändert     ║
 // ╚══════════════════════════════════════════════════════════════════╝
 
 const PORT = process.env.PORT || 3000;
