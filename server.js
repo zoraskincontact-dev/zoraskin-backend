@@ -646,7 +646,8 @@ async function getExistingTitles(shopToken) {
 // Detaillierte Duplikat-Suche: liefert komplette Produktdaten zurück
 async function getExistingProducts(shopToken) {
   try {
-    const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/products.json?limit=250&fields=id,title,handle,vendor,product_type,tags,variants,image,images,status`, {
+    // body_html für Audit-Funktion (Beschreibungs-Vergleich)
+    const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/products.json?limit=250&fields=id,title,handle,body_html,vendor,product_type,tags,variants,image,images,status`, {
       headers: { 'X-Shopify-Access-Token': shopToken }
     });
     const d = await r.json();
@@ -658,6 +659,8 @@ async function getExistingProducts(shopToken) {
       vendor: p.vendor,
       productType: p.product_type,
       tags: p.tags,
+      bodyHtml: p.body_html || '',
+      bodyText: stripHtml(p.body_html || ''),
       price: p.variants?.[0]?.price,
       compareAt: p.variants?.[0]?.compare_at_price,
       mainImage: p.image?.src || p.images?.[0]?.src || '',
@@ -670,6 +673,33 @@ async function getExistingProducts(shopToken) {
     console.error('getExistingProducts Error:', e.message);
     return [];
   }
+}
+
+// HTML-Tags entfernen + Whitespace normalisieren
+function stripHtml(html) {
+  if (!html) return '';
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&[a-z]+;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Vergleicht zwei Texte (für Beschreibungen — länger als Titel)
+function calculateTextSimilarity(t1, t2) {
+  if (!t1 || !t2) return 0;
+  const a = t1.toLowerCase().replace(/[^a-z0-9äöüéèàç ]+/g, ' ').trim();
+  const b = t2.toLowerCase().replace(/[^a-z0-9äöüéèàç ]+/g, ' ').trim();
+  if (a === b) return 1.0;
+  // Wörter > 3 Chars (Stopwords filtern automatisch)
+  const aWords = new Set(a.split(/\s+/).filter(w => w.length > 3));
+  const bWords = new Set(b.split(/\s+/).filter(w => w.length > 3));
+  if (aWords.size === 0 || bWords.size === 0) return 0;
+  const intersection = [...aWords].filter(w => bWords.has(w));
+  const union = new Set([...aWords, ...bWords]);
+  return union.size > 0 ? intersection.length / union.size : 0;
 }
 
 // Fuzzy-Match: wie ähnlich sind zwei Produktnamen
@@ -1393,6 +1423,89 @@ app.delete('/api/shopify/product/:id', async (req, res) => {
     res.json({ success: r.ok, status: r.status });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ============= SHOP AUDIT: DUPLIKAT-FINDER =============
+// Vergleicht alle Shopify-Produkte gegeneinander, findet Duplikat-Paare
+app.get('/api/audit/duplicates', async (req, res) => {
+  const log = [];
+  const L = (msg, type='sys') => { log.push({msg, type}); console.log('['+type+'] '+msg); };
+  try {
+    const threshold = parseFloat(req.query.threshold || '0.6');
+    const shopToken = await getShopifyToken();
+    L('Lade alle Shopify-Produkte...', 'info');
+    const products = await getExistingProducts(shopToken);
+    L(`✓ ${products.length} Produkte geladen`, 'ok');
+
+    if (products.length < 2) {
+      return res.json({
+        success: true,
+        productCount: products.length,
+        duplicatePairs: [],
+        message: 'Zu wenige Produkte für Duplikat-Audit (mindestens 2 nötig)',
+        log
+      });
+    }
+
+    L(`Analyse: ${products.length}×${products.length-1}/2 = ${Math.round(products.length * (products.length-1) / 2)} Vergleiche`, 'info');
+    L(`Threshold: ${Math.round(threshold * 100)}% Ähnlichkeit (Name 50% + Beschreibung 50%)`, 'info');
+
+    const pairs = [];
+    for (let i = 0; i < products.length; i++) {
+      for (let j = i + 1; j < products.length; j++) {
+        const a = products[i];
+        const b = products[j];
+
+        // Name-Similarity (verwendet bestehende Funktion)
+        const nameSim = calculateSimilarity(a.title, b.title);
+        // Beschreibungs-Similarity
+        const descSim = calculateTextSimilarity(a.bodyText || '', b.bodyText || '');
+
+        // Gewichtetes Total: 50% Name + 50% Beschreibung
+        // Falls eine Beschreibung leer: voller Name-Score
+        const hasDesc = (a.bodyText || '').length > 20 && (b.bodyText || '').length > 20;
+        const total = hasDesc
+          ? (nameSim * 0.5 + descSim * 0.5)
+          : nameSim;
+
+        if (total >= threshold) {
+          pairs.push({
+            similarity: total,
+            nameSimilarity: nameSim,
+            descSimilarity: descSim,
+            hasDescription: hasDesc,
+            productA: {
+              id: a.id, title: a.title, mainImage: a.mainImage,
+              price: a.price, status: a.status, imageCount: a.imageCount,
+              adminUrl: a.adminUrl, publicUrl: a.publicUrl,
+              productType: a.productType, vendor: a.vendor,
+              descPreview: (a.bodyText || '').slice(0, 150)
+            },
+            productB: {
+              id: b.id, title: b.title, mainImage: b.mainImage,
+              price: b.price, status: b.status, imageCount: b.imageCount,
+              adminUrl: b.adminUrl, publicUrl: b.publicUrl,
+              productType: b.productType, vendor: b.vendor,
+              descPreview: (b.bodyText || '').slice(0, 150)
+            }
+          });
+        }
+      }
+    }
+
+    pairs.sort((x, y) => y.similarity - x.similarity);
+    L(`✓ ${pairs.length} Duplikat-Paare gefunden über Threshold ${Math.round(threshold * 100)}%`, pairs.length > 0 ? 'warn' : 'ok');
+
+    res.json({
+      success: true,
+      productCount: products.length,
+      duplicatePairs: pairs,
+      threshold,
+      log
+    });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message, log });
   }
 });
 
