@@ -1669,7 +1669,17 @@ app.post('/api/catalog/search', async (req, res) => {
 
     L(`Roh-Sammlung: ${allProducts.size} unique Produkte`, 'info');
 
-    // Score + Sub-Tags + Hub-Tags zuweisen
+    // Shopify-Duplikate vorab laden (ein Call, sehr günstig)
+    let existingProducts = [];
+    try {
+      const shopToken = await getShopifyToken();
+      existingProducts = await getExistingProducts(shopToken);
+      L(`${existingProducts.length} bestehende Shop-Produkte für Duplikat-Check geladen`, 'sys');
+    } catch(e) {
+      L(`Shopify-Load Warnung: ${e.message} — Duplikat-Check übersprungen`, 'warn');
+    }
+
+    // Score + Sub-Tags + Hub-Tags + Duplikat-Check zuweisen
     const scoredProducts = Array.from(allProducts.values()).map(p => {
       const fakeTrend = { cjKeyword: '', estimatedMargin: 70, priceRange: { min: 15, max: 60 } };
       const { score, reasons } = scoreProduct(p, fakeTrend, null);
@@ -1677,6 +1687,10 @@ app.post('/api/catalog/search', async (req, res) => {
       const hubTags = assignHubTags(subTags);
       const ek = parseFloat(p.nowPrice || p.sellPrice || 0);
       const { vk, compareAt, margin } = calculatePricing(ek, fakeTrend);
+      // Auto-Duplikat-Check
+      const dupes = existingProducts.length > 0
+        ? findDuplicates({ name: p.productNameEn || '' }, existingProducts, 0.6)
+        : [];
       return {
         cjId: p.pid,
         name: p.productNameEn,
@@ -1692,6 +1706,9 @@ app.post('/api/catalog/search', async (req, res) => {
         hasCECertification: p.hasCECertification === 1,
         deliveryCycle: p.deliveryCycle,
         warehouseInventory: p.warehouseInventoryNum || 0,
+        // NEU: Duplikat-Info
+        isDuplicate: dupes.length > 0,
+        duplicates: dupes,
       };
     });
 
@@ -1702,12 +1719,14 @@ app.post('/api/catalog/search', async (req, res) => {
     });
 
     const finalList = scoredProducts.slice(0, limit);
+    const dupCount = finalList.filter(p => p.isDuplicate).length;
 
-    L(`✓ FERTIG · ${finalList.length} Produkte zurück (sortiert nach Score)`, 'ok');
+    L(`✓ FERTIG · ${finalList.length} Produkte (${dupCount} Duplikate markiert)`, 'ok');
     res.json({
       success: true,
       total: finalList.length,
       totalUnique: allProducts.size,
+      duplicateCount: dupCount,
       requestedSubTags: activeSubTags,
       products: finalList,
       log
