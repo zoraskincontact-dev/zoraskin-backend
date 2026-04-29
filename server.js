@@ -1,4 +1,19 @@
-// ZoraSkin Backend v8.4 — Vollständig: TikTok Apify + EU-Lager + Multi-Lang + EU-Compliance + Frische + Collections
+// ZoraSkin Backend v8.6 — Tier 1+2 Curated Retailer
+// =============================================================================
+// Änderungen gegenüber v8.4:
+//   ✓ CJ Rate-Limit Throttle (1 req/sec, kein 429-Spam mehr)
+//   ✓ V1-Fallback strenger (Pflicht: Beauty-Wort + Keyword-Match + !NonBeauty)
+//   ✓ Image-Sanity HARD-Filter (Mismatches fliegen raus statt nur Warnung)
+//   ✓ Phase 2 sequenziell statt parallel (CJ-Limit-konform)
+//   ✓ NEU: BEAUTY_WORDS / NON_BEAUTY auf Tier 1+2 umgestellt
+//          (nur mechanische Tools, Textiles, Accessories, Wellness)
+//   ✓ NEU: assignSubcategoryTags() — Auto-Tagging für Sub-Collections
+//   ✓ NEU: publishProduct nutzt Sub-Tags (Facial Tools, Hair Tools, etc.)
+//   ✓ NEU: Setup-Block v3.0 — 4 Hubs (Tools/Textiles/Accessories/Wellness)
+//   ✓ NEU: Sonnet-Trend-Prompt: nur Tier 1+2-Trends (keine Cremes/Seren/LED)
+//   ✓ NEU: Marketing-Prompt entschärft — keine Heil-/Cure-Claims
+// =============================================================================
+
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
@@ -28,11 +43,9 @@ const CONFIG = {
 const CJ_BASE = 'https://developers.cjdropshipping.com/api2.0/v1';
 const APIFY_BASE = 'https://api.apify.com/v2';
 
-// EU-Lager Country Codes (CJ-Warehouses)
 const EU_WAREHOUSE_CODES = ['DE', 'FR', 'CZ', 'IT', 'ES', 'GB', 'NL', 'PL'];
 const US_WAREHOUSE_CODES = ['US', 'CA'];
 
-// Sprachen mit Native-Namen für Marketing
 const SUPPORTED_LANGUAGES = {
   EN: 'English', DE: 'German (Du-Form, freundlich)', FR: 'French', IT: 'Italian', ES: 'Spanish'
 };
@@ -41,6 +54,18 @@ let shopifyToken = '', shopifyTokenExpiry = 0;
 let cjToken = '', cjTokenExpiry = 0;
 let beautyCategoryIds = null, beautyCategoryNames = [];
 let collectionsCache = null, collectionsCacheExpiry = 0;
+
+// ============= CJ RATE-LIMIT THROTTLE =============
+let cjLastCall = 0;
+const CJ_MIN_GAP_MS = 1100;
+async function cjThrottle() {
+  const now = Date.now();
+  const since = now - cjLastCall;
+  if (since < CJ_MIN_GAP_MS) {
+    await new Promise(r => setTimeout(r, CJ_MIN_GAP_MS - since));
+  }
+  cjLastCall = Date.now();
+}
 
 // ============= AUTH =============
 async function getShopifyToken() {
@@ -63,6 +88,7 @@ async function getShopifyToken() {
 
 async function getCJToken() {
   if (cjToken && Date.now() < cjTokenExpiry - 60000) return cjToken;
+  await cjThrottle();
   const r = await fetch(`${CJ_BASE}/authentication/getAccessToken`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -94,7 +120,6 @@ async function runApifyActor(actorId, input, options = {}) {
   return Array.isArray(data) ? data : [];
 }
 
-// ============= APIFY: TIKTOK DISCOVERY =============
 async function discoverTikTokTrends(options = {}, log = () => {}) {
   const { country = 'US', period = '30', maxResults = 50 } = options;
   if (!CONFIG.APIFY_TOKEN) {
@@ -102,21 +127,14 @@ async function discoverTikTokTrends(options = {}, log = () => {}) {
     return [];
   }
   log(`TikTok Discovery: Beauty-Hashtags ${country} letzte ${period} Tage`, 'info');
-
   const input = {
     scrapeHashtags: true, scrapeVideos: false, scrapeCreators: false, scrapeSongs: false,
-    hashtagCountries: [country],
-    hashtagIndustries: ['Beauty & Personal Care'],
-    hashtagPeriod: period,
-    hashtagMaxItems: Math.max(maxResults, 100),
-    hashtagNewOnly: false,
+    hashtagCountries: [country], hashtagIndustries: ['Beauty & Personal Care'],
+    hashtagPeriod: period, hashtagMaxItems: Math.max(maxResults, 100), hashtagNewOnly: false,
   };
-
   try {
     const items = await runApifyActor(CONFIG.APIFY_DISCOVERY_ACTOR, input, { timeoutSec: 180 });
     log(`✓ TikTok Discovery raw: ${items.length} Items`, 'ok');
-
-    // Echte Apify-Feldnamen: PascalCase mit Spaces
     const mapped = items.map(item => ({
       hashtag: (item.Hashtag || item.hashtag || '').replace(/^#/, '').trim(),
       rank: item.Rank || item.rank || null,
@@ -134,10 +152,7 @@ async function discoverTikTokTrends(options = {}, log = () => {}) {
       trendStats: item['Trend Stats'] || null,
       raw: item,
     })).filter(t => t.hashtag);
-
     log(`Nach Field-Mapping: ${mapped.length} Items`, 'info');
-
-    // Beauty-Industry + Country-Filter (Apify ist nicht zuverlässig)
     const beautyKeywords = ['beauty', 'personal care', 'cosmetic', 'health'];
     const filtered = mapped.filter(t => {
       const ind = (t.industry || '').toLowerCase();
@@ -146,10 +161,8 @@ async function discoverTikTokTrends(options = {}, log = () => {}) {
       return matchesIndustry && matchesCountry;
     });
     log(`Nach Beauty+Country-Filter (${country}): ${filtered.length} Items`, filtered.length > 0 ? 'ok' : 'warn');
-
-    // Fallback: Hashtag-Wort-Filter wenn Industry-Filter zu streng
     if (filtered.length < 3 && mapped.length > 0) {
-      const beautyHashtagWords = ['skin','beauty','skincare','makeup','glow','hair','lash','lip','nail','serum','spa','facial','derm','cosmetic','blush','contour','mascara','foundation','retinol','vitamin','collagen','sunscreen','exfoliate','moisturize','clean','wash','toner','essence','peptide','hyaluronic','niacin','tinted','radiant','dewy'];
+      const beautyHashtagWords = ['skin','beauty','skincare','makeup','glow','hair','lash','lip','nail','spa','facial','blush','contour','mascara','foundation','tinted','radiant','dewy','guasha','jaderoller','rosequartz'];
       const hashtagFiltered = mapped.filter(t => {
         const h = t.hashtag.toLowerCase();
         const matchesHashtag = beautyHashtagWords.some(kw => h.includes(kw));
@@ -158,10 +171,7 @@ async function discoverTikTokTrends(options = {}, log = () => {}) {
       });
       log(`Fallback Hashtag-Keyword-Filter: ${hashtagFiltered.length} Items`, hashtagFiltered.length > 0 ? 'info' : 'warn');
       const merged = [...filtered];
-      hashtagFiltered.forEach(t => {
-        if (!merged.some(x => x.hashtag === t.hashtag)) merged.push(t);
-      });
-      // FRISCHE-PRIORISIERUNG: isNew + trendDirection: up zuerst
+      hashtagFiltered.forEach(t => { if (!merged.some(x => x.hashtag === t.hashtag)) merged.push(t); });
       merged.sort((a, b) => {
         const aFresh = (a.isNew ? 2 : 0) + (a.trendDirection === 'up' ? 1 : 0);
         const bFresh = (b.isNew ? 2 : 0) + (b.trendDirection === 'up' ? 1 : 0);
@@ -169,8 +179,6 @@ async function discoverTikTokTrends(options = {}, log = () => {}) {
       });
       return merged.slice(0, maxResults);
     }
-
-    // Sortiere auch im normalen Pfad nach Frische
     filtered.sort((a, b) => {
       const aFresh = (a.isNew ? 2 : 0) + (a.trendDirection === 'up' ? 1 : 0);
       const bFresh = (b.isNew ? 2 : 0) + (b.trendDirection === 'up' ? 1 : 0);
@@ -183,32 +191,28 @@ async function discoverTikTokTrends(options = {}, log = () => {}) {
   }
 }
 
-// ============= APIFY: TIKTOK LOOKUP =============
 async function lookupHashtagAnalytics(hashtags, options = {}, log = () => {}) {
   const { country = 'US' } = options;
   if (!CONFIG.APIFY_TOKEN || !hashtags?.length) return [];
   const cleanHashtags = hashtags.map(h => h.replace(/^#/, '').toLowerCase().replace(/\s+/g, ''));
   log(`TikTok Lookup: ${cleanHashtags.length} Hashtags Detail-Analyse`, 'info');
-
   const input = { hashtags: cleanHashtags, country, mode: 'lookup' };
   try {
     const items = await runApifyActor(CONFIG.APIFY_LOOKUP_ACTOR, input, { timeoutSec: 240 });
     log(`✓ TikTok Lookup raw: ${items.length} Items`, 'ok');
-    if (items.length > 0) {
-      log(`Lookup-Felder: ${Object.keys(items[0]).join(', ')}`, 'info');
-    }
+    if (items.length > 0) log(`Lookup-Felder: ${Object.keys(items[0]).join(', ')}`, 'info');
     return items.map(item => ({
       hashtag: (item.Hashtag || item.hashtag_name || item.hashtagName || item.name || item.hashtag || '').replace(/^#/, ''),
       views7d: item['7d Video Views'] || item.views7d || item.views_7d || 0,
       viewsTotal: item['Video Views'] || item.viewsTotal || item.views_total || item.views || 0,
       videoCount: item.Posts || item.publishCnt || item.videoCount || 0,
-      audienceAges: item['Audience Ages'] || item.audienceAges || item.audience_ages || [],
-      audienceInterests: item['Audience Interests'] || item.audienceInterests || item.audience_interests || [],
-      topCountries: item['Top Countries'] || item.topCountries || item.top_countries || [],
-      relatedHashtags: item['Related Hashtags'] || item.relatedHashtags || item.related_hashtags || [],
-      topCreators: item['Top Creators'] || item.topCreators || item.top_creators || [],
-      topVideos: item['Top Videos'] || item.topVideos || item.top_videos || [],
-      trendChart: item['Trend Data'] || item.trendChart || item.trend_chart || [],
+      audienceAges: item['Audience Ages'] || item.audienceAges || [],
+      audienceInterests: item['Audience Interests'] || item.audienceInterests || [],
+      topCountries: item['Top Countries'] || item.topCountries || [],
+      relatedHashtags: item['Related Hashtags'] || item.relatedHashtags || [],
+      topCreators: item['Top Creators'] || item.topCreators || [],
+      topVideos: item['Top Videos'] || item.topVideos || [],
+      trendChart: item['Trend Data'] || item.trendChart || [],
       raw: item,
     }));
   } catch(e) {
@@ -223,6 +227,7 @@ const BEAUTY_CATEGORY_KEYWORDS = ['beauty','skin','hair','cosmetic','makeup','pe
 async function loadBeautyCategoryIds(cjt, log = () => {}) {
   if (beautyCategoryIds) return { ids: beautyCategoryIds, names: beautyCategoryNames };
   try {
+    await cjThrottle();
     const r = await fetch(`${CJ_BASE}/product/getCategory`, { headers: { 'CJ-Access-Token': cjt } });
     const d = await r.json();
     if (!d.result || !d.data) {
@@ -258,15 +263,167 @@ async function loadBeautyCategoryIds(cjt, log = () => {}) {
   }
 }
 
-// ============= BEAUTY-FILTER =============
-const BEAUTY_WORDS = ['skin','face','beauty','hair','eye','lip','mask','serum','cream','roller','gua','jade','light therapy','whitening','massager','scrubber','razor','vitamin','collagen','therapy','lift','pore','acne','tone','glow','bright','anti aging','wrinkle','moistur','sunscreen','retinol','peptide','hyaluronic','niacin','lash','brow','neck','scalp','dental','teeth','charcoal','exfoli','cleanser','toner','essence','lotion','mist','spray','patch','strip','sponge','blender','brush','eyelid','cellulite','contouring','derma','microcurrent','radiofrequency','infrared','spa','facial','wand','globe','ice','steamer','nose','blackhead','red light','led light'];
-const NON_BEAUTY = ['vacuum cleaner','car ','automotive','kitchen','food ','pet ','toy ','gaming','computer','phone case','cable','charger','tool','drill','bicycle','sport shoe','fishing','garden','furniture','mattress','curtain','laptop','tablet','headphone','keyboard','mouse pad','watch band','mobile phone','camera','speaker','audio','remote control'];
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║ TIER 1 + 2 FILTER                                                ║
+// ║ Sicher: mechanisch, ohne Inhaltsstoffe, ohne Elektrik-Hautkontakt ║
+// ╚══════════════════════════════════════════════════════════════════╝
+const BEAUTY_WORDS = [
+  // Tier 1 — Stein-Tools
+  'gua sha','jade roller','rose quartz','quartz','jade','amethyst','obsidian','bian stone',
+  'face roller','stone roller','dual roller','cryo globe','ice globe','ice roller','stone massager',
+  // Tier 1 — Hair Accessories
+  'hair brush','wooden brush','boar bristle','detangling','wide tooth comb','wooden comb',
+  'hair clip','hair claw','barrette','scrunchie','satin scrunchie','silk scrunchie',
+  'headband','hair band','hair towel','microfiber wrap','hair turban','silk hair',
+  'heatless curl','curling rod','curling set',
+  // Tier 1 — Eyelash & Brow (mechanical)
+  'eyelash curler','tweezer','tweezers','brow brush','brow comb','brow stencil','lash comb','lash applicator',
+  // Tier 1 — Nail & Hand
+  'cuticle pusher','cuticle scissor','nail buffer','nail file','glass file','crystal file',
+  'manicure tray','hand massage','nail brush',
+  // Tier 1 — Makeup Tools
+  'makeup brush','brush set','beauty sponge','silicone sponge','blender','brush holder',
+  'brush cleaning','cleaning mat','cleaning bowl','makeup spatula',
+  // Tier 1 — Storage
+  'vanity tray','marble tray','acrylic tray','vanity organizer','makeup organizer',
+  'cotton pad jar','q-tip jar','lipstick holder','jewelry tray','makeup bag','travel pouch','toiletry pouch',
+  // Tier 1 — Bath & Spa Accessories
+  'bath pillow','loofah','konjac sponge','konjac','body buffer','body brush','dry brush',
+  'pumice','foot file','bath caddy','bathrobe','spa wrap','silk pillowcase','satin pillowcase',
+  // Tier 1 — Sleep textiles
+  'sleep mask','silk mask','satin mask','eye mask',
+  // Tier 1 — Skincare Accessories (no ingredients)
+  'reusable pad','cotton pad','cleansing cloth','face cloth','clay mask brush',
+  'mask applicator','spatula','empty jar','empty bottle','pipette','dropper',
+  // Tier 1 — Wellness
+  'aroma stone','rollerball','incense holder','grip strengthener','stress ball','meditation ball','baoding',
+  'acupressure mat','acupressure pillow','acupressure ring',
+  // Tier 2 — moderate, mit Auflagen
+  'silicone pad','reusable patch','silk wrap','microfiber towel','massage stick',
+  'cellulite cup','massage cup','wooden roller','foot roller','foot massage',
+  'lymph drainage','manual derma roller'
+];
+
+const NON_BEAUTY = [
+  // Tier 4 — Kosmetika mit Inhaltsstoffen
+  'cream','serum','toner','cleanser','lotion','balm','salve','moisturizer','moisturiser',
+  'essence','ampoule','peeling','scrub','exfoliant','mask gel','sheet mask','clay mask',
+  'mud mask','bubble mask','peel-off','retinol','hyaluronic','vitamin c serum','niacinamide',
+  'peptide','collagen','aha','bha','ceramide','snail','propolis','centella','glycolic',
+  'salicylic','tretinoin','kojic','arbutin','hydroquinone',
+  // Lippe / Augen / Make-up mit Inhalt
+  'lipstick','lip balm','lip gloss','lip oil','lip tint','lip stain',
+  'mascara','eyeliner','eye shadow','eyeshadow','eyebrow gel','brow pomade','brow tint',
+  'foundation','concealer','blush','bronzer','contour stick','highlighter stick','setting spray',
+  'setting powder','primer','bb cream','cc cream',
+  // Nail polish, treatments
+  'nail polish','nail lacquer','top coat','base coat','gel polish','nail gel','nail strengthener',
+  'cuticle oil','cuticle cream','nail growth',
+  // Haar mit Inhalt
+  'shampoo','conditioner','hair mask','hair oil','hair serum','hair treatment','leave-in',
+  'hair dye','hair color','hair colour','hair bleach','hair toner','hair tonic',
+  // Body Care mit Inhalt
+  'body lotion','body cream','body oil','body butter','body scrub','body wash','shower gel',
+  'cellulite cream','firming cream','slimming','self tan','self-tan','tanning',
+  'deodorant cream','antiperspirant',
+  // Sun, Tan
+  'sunscreen','sun cream','sunblock','spf','after sun',
+  // Tier 4 — Elektrische Geräte mit Hautkontakt
+  'led mask','led wand','led therapy','led panel','red light therapy','blue light therapy',
+  'microcurrent','radio frequency','radiofrequency','rf device','high frequency','high-frequency',
+  'sonic cleansing','sonic brush','vibration brush','rotating brush','spin brush',
+  'electric scrubber','electric blackhead','blackhead vacuum','pore vacuum','suction',
+  'laser hair removal','ipl device','ipl handset','epilator','permanent hair removal',
+  'electric razor','electric shaver','electric trimmer','electric exfoliator',
+  'ultrasonic skin','ultrasonic cleanser','ultrasonic device',
+  'galvanic device','iontophoresis','microdermabrasion','derma pen','dermapen','microneedling',
+  'plasma pen','plasma device','tens device','ems device','heated mask',
+  // Heisse Tools
+  'curling iron','curling wand','flat iron','straightener','straightening brush','hair dryer',
+  'blow dryer','heated brush','hair steamer','heated cap','hair iron',
+  // Wax & Sugaring
+  'wax kit','wax warmer','sugaring','sugar paste','depilatory','epilation cream','hair removal cream',
+  // Tattoo & Piercing
+  'tattoo kit','tattoo machine','tattoo ink','permanent makeup','microblading','pmu',
+  'piercing kit','piercing needle','piercing jewelry',
+  // Medizinprodukte
+  'acupuncture needle','syringe','injection','filler','botox','prp','derma filler',
+  // Originale Vermeidungs-Liste (nicht-Beauty allgemein)
+  'vacuum cleaner','car ','automotive','kitchen','food ','pet ','toy ','gaming','computer',
+  'phone case','cable','charger','tool battery','drill','bicycle','sport shoe','fishing','garden',
+  'furniture','mattress','curtain','laptop','tablet','headphone','keyboard','mouse pad',
+  'watch band','mobile phone','camera','speaker','audio','remote control',
+  // Müll-Produkte aus früheren Tests (defensiv)
+  'loveseat','sofa','chair','table','dress','nightgown','pants','baseball cap','ring','jewelry',
+  'bracelet','necklace','earring','clothing','shoes','boots','jacket','t-shirt','hoodie',
+  'rug','lamp','light fixture'
+];
 
 function containsBeautyWord(name) { const n = (name || '').toLowerCase(); return BEAUTY_WORDS.some(w => n.includes(w)); }
 function containsNonBeauty(name) { const n = (name || '').toLowerCase(); return NON_BEAUTY.some(nb => n.includes(nb)); }
 
+// ============= AUTO-TAGGING: Sub-Collection-Tags =============
+const SUB_TAG_RULES = [
+  // Tools
+  { tag: 'Facial Tools',    keywords: ['gua sha','face roller','jade roller','rose quartz','cryo globe','ice globe','stone massager','dual roller'] },
+  { tag: 'Body Tools',      keywords: ['body brush','dry brush','body buffer','massage stick','cellulite cup','massage cup','foot roller','foot massage','lymph drainage','wooden roller'] },
+  { tag: 'Hair Tools',      keywords: ['hair brush','wooden brush','boar bristle','detangling','wide tooth comb','wooden comb','scalp massager'] },
+  { tag: 'Eyelash & Brow',  keywords: ['eyelash curler','lash applicator','brow brush','brow comb','brow stencil','lash comb','tweezer'] },
+  { tag: 'Nail & Hand',     keywords: ['cuticle pusher','cuticle scissor','nail buffer','nail file','glass file','crystal file','nail brush','manicure tray','hand massage'] },
+  { tag: 'Makeup Tools',    keywords: ['makeup brush','brush set','beauty sponge','silicone sponge','blender','brush cleaning','cleaning mat','cleaning bowl','makeup spatula'] },
+  // Textiles
+  { tag: 'Sleep Textiles',  keywords: ['silk pillowcase','satin pillowcase','sleep mask','silk mask','satin mask','eye mask','silk hair','silk wrap'] },
+  { tag: 'Bath Textiles',   keywords: ['bath pillow','loofah','konjac sponge','konjac','body buffer','bathrobe','spa wrap'] },
+  { tag: 'Reusable Pads',   keywords: ['reusable pad','cotton pad','cleansing cloth','face cloth','microfiber towel'] },
+  { tag: 'Hair Turbans',    keywords: ['hair towel','microfiber wrap','hair turban'] },
+  { tag: 'Robes & Wraps',   keywords: ['bathrobe','spa wrap','satin wrap'] },
+  // Accessories
+  { tag: 'Storage',         keywords: ['vanity organizer','makeup organizer','bathroom storage'] },
+  { tag: 'Brushes',         keywords: ['brush set','single brush'] },
+  { tag: 'Holders',         keywords: ['brush holder','lipstick holder','cotton pad jar','q-tip jar'] },
+  { tag: 'Trays',           keywords: ['vanity tray','marble tray','acrylic tray','jewelry tray'] },
+  { tag: 'Travel Pouches',  keywords: ['makeup bag','travel pouch','toiletry pouch','travel case'] },
+  // Wellness
+  { tag: 'Bath & Spa',      keywords: ['bath pillow','foot file','pumice','bath caddy'] },
+  { tag: 'Aromatherapy',    keywords: ['aroma stone','rollerball','incense holder'] },
+  { tag: 'Hand Strengthening', keywords: ['grip strengthener','stress ball','meditation ball','baoding'] },
+  { tag: 'Acupressure',     keywords: ['acupressure mat','acupressure pillow','acupressure ring'] }
+];
+
+// Mapping Sub-Tag → Hub
+const HUB_BY_SUBTAG = {
+  'Facial Tools': 'Tools', 'Body Tools': 'Tools', 'Hair Tools': 'Tools',
+  'Eyelash & Brow': 'Tools', 'Nail & Hand': 'Tools', 'Makeup Tools': 'Tools',
+  'Sleep Textiles': 'Textiles', 'Bath Textiles': 'Textiles',
+  'Reusable Pads': 'Textiles', 'Hair Turbans': 'Textiles', 'Robes & Wraps': 'Textiles',
+  'Storage': 'Accessories', 'Brushes': 'Accessories', 'Holders': 'Accessories',
+  'Trays': 'Accessories', 'Travel Pouches': 'Accessories',
+  'Bath & Spa': 'Wellness', 'Aromatherapy': 'Wellness',
+  'Hand Strengthening': 'Wellness', 'Acupressure': 'Wellness'
+};
+
+function assignSubcategoryTags(productName) {
+  const name = (productName || '').toLowerCase();
+  const matched = new Set();
+  for (const rule of SUB_TAG_RULES) {
+    if (rule.keywords.some(kw => name.includes(kw))) {
+      matched.add(rule.tag);
+    }
+  }
+  return Array.from(matched);
+}
+
+function assignHubTags(subTags) {
+  const hubs = new Set();
+  for (const sub of subTags) {
+    if (HUB_BY_SUBTAG[sub]) hubs.add(HUB_BY_SUBTAG[sub]);
+  }
+  return Array.from(hubs);
+}
+
 // ============= CJ V2 SEARCH =============
 async function searchProductsV2(cjt, params) {
+  await cjThrottle();
   const queryParams = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
     if (v === null || v === undefined || v === '') return;
@@ -304,6 +461,7 @@ async function searchProductsV2(cjt, params) {
 }
 
 async function searchProductsV1Fallback(cjt, keyword, page = 1) {
+  await cjThrottle();
   const r = await fetch(`${CJ_BASE}/product/list?productNameEn=${encodeURIComponent(keyword)}&pageNum=${page}&pageSize=20`, {
     headers: { 'CJ-Access-Token': cjt }
   });
@@ -363,18 +521,27 @@ async function findCJProductsForTrend(cjt, trend, log = () => {}) {
     } catch(e) { log(`  Strategie 3 Fehler: ${e.message}`, 'warn'); }
   }
 
+  // V1-Fallback STRENG: Pflicht Beauty-Wort + Keyword-Match + !NonBeauty
   if (!result || result.products.length === 0) {
     try {
       log(`  V1-Fallback...`, 'warn');
       const v1 = await searchProductsV1Fallback(cjt, keyword, 1);
-      const filtered = v1.filter(p => !containsNonBeauty(p.productNameEn) && containsBeautyWord(p.productNameEn));
+      const kwWords = (keyword || '').toLowerCase().split(/\s+/).filter(w => w.length > 2);
+      const filtered = v1.filter(p => {
+        const name = (p.productNameEn || '').toLowerCase();
+        return containsBeautyWord(name) && !containsNonBeauty(name) && kwWords.some(w => name.includes(w));
+      });
+      log(`  V1-Fallback gefiltert: ${v1.length} → ${filtered.length} (Pflicht: BeautyWord + KeywordMatch + !NonBeauty)`, filtered.length > 0 ? 'info' : 'warn');
       result = { products: filtered };
     } catch(e) { log(`  V1-Fallback Fehler: ${e.message}`, 'err'); return []; }
   }
-  return result?.products || [];
+
+  // Auch in Hauptergebnis nochmal NON_BEAUTY rauswerfen — defensiv
+  const cleanResults = (result?.products || []).filter(p => !containsNonBeauty(p.productNameEn));
+  return cleanResults;
 }
 
-// ============= SCORING (mit EU-Lager-Bonus) =============
+// ============= SCORING =============
 function scoreProduct(p, trend, stockData = null) {
   let score = 0;
   const reasons = [];
@@ -392,48 +559,35 @@ function scoreProduct(p, trend, stockData = null) {
   const kwMatch = kwWords.filter(w => name.includes(w)).length;
   if (kwMatch > 0) { score += kwMatch * 8; reasons.push(`KwMatch:+${kwMatch * 8}`); }
   const beautyHits = BEAUTY_WORDS.filter(w => name.includes(w)).length;
-  if (beautyHits > 0) { score += Math.min(15, beautyHits * 3); reasons.push(`BeautyKw:+${Math.min(15, beautyHits * 3)}`); }
-  if (containsNonBeauty(name)) { score -= 50; reasons.push('NonBeauty:-50'); }
+  if (beautyHits > 0) { score += Math.min(15, beautyHits * 3); reasons.push(`Tier1Match:+${Math.min(15, beautyHits * 3)}`); }
+  if (containsNonBeauty(name)) { score -= 100; reasons.push('NonBeauty:-100'); }  // Härter als vorher (-50 → -100)
   if (p.verifiedWarehouse === 1) { score += 10; reasons.push('Verified:+10'); }
   if (p.warehouseInventoryNum > 100) { score += 5; reasons.push('Stock:+5'); }
   if (p.addMarkStatus === 1) { score += 5; reasons.push('FreeShip:+5'); }
   if (p.isVideo === 1 || (p.videoList && p.videoList.length > 0)) { score += 5; reasons.push('Video:+5'); }
   if (p.hasCECertification === 1) { score += 5; reasons.push('CE:+5'); }
   if (p.deliveryCycle && /^[1-5]/.test(p.deliveryCycle)) { score += 5; reasons.push('FastShip:+5'); }
-
-  // EU-LAGER-BONUS (NEU)
   if (stockData && Array.isArray(stockData)) {
     const euStocks = stockData.filter(s => EU_WAREHOUSE_CODES.includes(s.country) && s.total > 0);
     if (euStocks.length > 0) {
       const totalEuStock = euStocks.reduce((sum, s) => sum + s.total, 0);
-      if (totalEuStock > 100) {
-        score += 15;
-        reasons.push(`EU-Lager(${euStocks.map(s => s.country).join(',')}):+15`);
-      } else {
-        score += 8;
-        reasons.push(`EU-Lager:+8`);
-      }
+      if (totalEuStock > 100) { score += 15; reasons.push(`EU-Lager(${euStocks.map(s => s.country).join(',')}):+15`); }
+      else { score += 8; reasons.push('EU-Lager:+8'); }
     }
   }
-
-  // FRISCHE-TRENDS-BONUS aus TikTok-Live (NEU)
   if (trend.tiktokLive) {
-    if (trend.tiktokLive.isNew) {
-      score += 10;
-      reasons.push('NewTrend:+10');
-    }
+    if (trend.tiktokLive.isNew) { score += 10; reasons.push('NewTrend:+10'); }
     if (trend.tiktokLive.trendDirection === 'up' || (trend.tiktokLive.rankChange || 0) > 0) {
-      score += 8;
-      reasons.push('TrendUp:+8');
+      score += 8; reasons.push('TrendUp:+8');
     }
   }
-
   return { score: Math.round(score), reasons };
 }
 
 // ============= CJ DETAILS =============
 async function getCJProductDetails(cjt, pid) {
   try {
+    await cjThrottle();
     const r = await fetch(`${CJ_BASE}/product/query?pid=${pid}&features=enable_video,enable_inventory`, {
       headers: { 'CJ-Access-Token': cjt }
     });
@@ -474,6 +628,7 @@ async function getCJProductDetails(cjt, pid) {
 
 async function getCJProductReviews(cjt, pid) {
   try {
+    await cjThrottle();
     const r = await fetch(`${CJ_BASE}/product/productComments?pid=${pid}&pageSize=10`, {
       headers: { 'CJ-Access-Token': cjt }
     });
@@ -496,6 +651,7 @@ async function getCJProductReviews(cjt, pid) {
 
 async function getCJStockByPid(cjt, pid) {
   try {
+    await cjThrottle();
     const r = await fetch(`${CJ_BASE}/product/stock/getInventoryByPid?pid=${pid}`, {
       headers: { 'CJ-Access-Token': cjt }
     });
@@ -508,20 +664,16 @@ async function getCJStockByPid(cjt, pid) {
   } catch(e) { return []; }
 }
 
-// ============= VERSAND-SCHÄTZUNG =============
 function estimateShipping(stock) {
-  // stock = Array von { country, total }
   const hasEU = stock.some(s => EU_WAREHOUSE_CODES.includes(s.country) && s.total > 0);
   const hasUS = stock.some(s => US_WAREHOUSE_CODES.includes(s.country) && s.total > 0);
   const hasCN = stock.some(s => s.country === 'CN' && s.total > 0);
-
   if (hasEU) return { fastest: 'EU-Lager', businessDays: '3-7', emoji: '🇪🇺', message: '3-7 Werktage (EU-Lager verfügbar)' };
   if (hasUS) return { fastest: 'US-Lager', businessDays: '7-12', emoji: '🇺🇸', message: '7-12 Werktage (US-Lager)' };
   if (hasCN) return { fastest: 'China-Versand', businessDays: '12-18', emoji: '🇨🇳', message: '12-18 Werktage (Versand aus China)' };
   return { fastest: 'unbekannt', businessDays: '12-20', emoji: '📦', message: '12-20 Werktage' };
 }
 
-// ============= IMAGE-SANITY-CHECK =============
 async function imageSanityCheck(imageUrl, productName, expectedCategory) {
   if (!CONFIG.ENABLE_IMAGE_SANITY_CHECK || !CONFIG.CLAUDE_KEY) return { ok: true, skipped: true };
   try {
@@ -534,7 +686,7 @@ async function imageSanityCheck(imageUrl, productName, expectedCategory) {
           role: 'user',
           content: [
             { type: 'image', source: { type: 'url', url: imageUrl } },
-            { type: 'text', text: `Product name: "${productName}"\nExpected category: ${expectedCategory}\n\nDoes this image actually show the named beauty/skincare product? Reply ONLY with valid JSON: {"matches":true/false,"reason":"max 8 words"}` }
+            { type: 'text', text: `Product name: "${productName}"\nExpected category: ${expectedCategory}\n\nDoes this image actually show the named beauty tool/textile/accessory? Reply ONLY with valid JSON: {"matches":true/false,"reason":"max 8 words"}` }
           ]
         }]
       })
@@ -546,7 +698,6 @@ async function imageSanityCheck(imageUrl, productName, expectedCategory) {
   } catch(e) { return { ok: true, error: e.message }; }
 }
 
-// ============= PRICING + IMPORT-PREP =============
 function calculatePricing(ek, trend, currency = 'USD') {
   const targetMargin = (trend.estimatedMargin || 70) / 100;
   const priceRange = trend.priceRange || { min: 15, max: 60 };
@@ -560,11 +711,10 @@ function calculatePricing(ek, trend, currency = 'USD') {
 }
 
 async function prepareProductForImport(cjt, cjProduct, trend, options = {}, log = () => {}) {
-  const [details, reviews, stock] = await Promise.all([
-    getCJProductDetails(cjt, cjProduct.pid),
-    getCJProductReviews(cjt, cjProduct.pid),
-    getCJStockByPid(cjt, cjProduct.pid),
-  ]);
+  // Sequenziell wegen CJ-Rate-Limit
+  const details = await getCJProductDetails(cjt, cjProduct.pid);
+  const reviews = await getCJProductReviews(cjt, cjProduct.pid);
+  const stock = await getCJStockByPid(cjt, cjProduct.pid);
 
   const ek = parseFloat(cjProduct.nowPrice || cjProduct.sellPrice || details?.ek || 0);
   const { vk, compareAt, margin } = calculatePricing(ek, trend, options.currency);
@@ -573,15 +723,18 @@ async function prepareProductForImport(cjt, cjProduct, trend, options = {}, log 
   let sanityCheck = { ok: true, skipped: true };
   if (CONFIG.ENABLE_IMAGE_SANITY_CHECK && allImages.length > 0) {
     sanityCheck = await imageSanityCheck(allImages[0], details?.name || cjProduct.productNameEn, trend.category);
-    log(`  Image-Check "${(details?.name || '').slice(0,40)}": ${sanityCheck.ok ? '✓' : '✗ ' + (sanityCheck.reason || 'Mismatch')}`, sanityCheck.ok ? 'info' : 'warn');
+    log(`  Image-Check "${(details?.name || cjProduct.productNameEn || '').slice(0,40)}": ${sanityCheck.ok ? '✓' : '✗ ' + (sanityCheck.reason || 'Mismatch')}`, sanityCheck.ok ? 'info' : 'warn');
   }
 
-  // Stock-Aufschlüsselung pro Region
   const usStock = stock.find(s => s.country === 'US');
   const cnStock = stock.find(s => s.country === 'CN');
   const euStocks = stock.filter(s => EU_WAREHOUSE_CODES.includes(s.country) && s.total > 0);
   const totalEUStock = euStocks.reduce((sum, s) => sum + s.total, 0);
   const shippingEstimate = estimateShipping(stock);
+
+  // Auto-Tagging für Sub-Collections + Hubs
+  const subTags = assignSubcategoryTags(details?.name || cjProduct.productNameEn || '');
+  const hubTags = assignHubTags(subTags);
 
   return {
     name: details?.name || cjProduct.productNameEn || trend.name,
@@ -605,20 +758,16 @@ async function prepareProductForImport(cjt, cjProduct, trend, options = {}, log 
     supplierName: cjProduct.supplierName || details?.supplierName || '',
     discountPriceRate: cjProduct.discountPriceRate,
     stock: {
-      us: usStock?.total || 0,
-      cn: cnStock?.total || 0,
-      eu: totalEUStock,
+      us: usStock?.total || 0, cn: cnStock?.total || 0, eu: totalEUStock,
       euCountries: euStocks.map(s => s.country),
       total: stock.reduce((s, x) => s + x.total, 0),
-      countries: stock.map(s => s.country),
-      raw: stock,
+      countries: stock.map(s => s.country), raw: stock,
     },
-    shipping: shippingEstimate,  // NEU
-    hasEUStock: totalEUStock > 0,  // NEU
-    reviews: {
-      count: reviews.count, avgScore: reviews.avgScore, topReviews: reviews.topReviews,
-    },
+    shipping: shippingEstimate,
+    hasEUStock: totalEUStock > 0,
+    reviews: { count: reviews.count, avgScore: reviews.avgScore, topReviews: reviews.topReviews },
     imageSanity: sanityCheck,
+    subTags, hubTags,  // NEU
     trend: {
       name: trend.name, cjKeyword: trend.cjKeyword,
       viralPlatform: trend.viralPlatform, trendReason: trend.trendReason,
@@ -631,41 +780,19 @@ async function prepareProductForImport(cjt, cjProduct, trend, options = {}, log 
   };
 }
 
-async function getExistingTitles(shopToken) {
-  const titles = new Set();
-  try {
-    const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/products.json?limit=250&fields=title`, {
-      headers: { 'X-Shopify-Access-Token': shopToken }
-    });
-    const d = await r.json();
-    (d.products || []).forEach(p => titles.add(p.title.toLowerCase().trim()));
-  } catch(e) {}
-  return titles;
-}
-
-// Detaillierte Duplikat-Suche: liefert komplette Produktdaten zurück
 async function getExistingProducts(shopToken) {
   try {
-    // body_html für Audit-Funktion (Beschreibungs-Vergleich)
     const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/products.json?limit=250&fields=id,title,handle,body_html,vendor,product_type,tags,variants,image,images,status`, {
       headers: { 'X-Shopify-Access-Token': shopToken }
     });
     const d = await r.json();
     return (d.products || []).map(p => ({
-      id: p.id,
-      title: p.title,
-      titleLower: p.title.toLowerCase().trim(),
-      handle: p.handle,
-      vendor: p.vendor,
-      productType: p.product_type,
-      tags: p.tags,
-      bodyHtml: p.body_html || '',
-      bodyText: stripHtml(p.body_html || ''),
-      price: p.variants?.[0]?.price,
-      compareAt: p.variants?.[0]?.compare_at_price,
+      id: p.id, title: p.title, titleLower: p.title.toLowerCase().trim(),
+      handle: p.handle, vendor: p.vendor, productType: p.product_type, tags: p.tags,
+      bodyHtml: p.body_html || '', bodyText: stripHtml(p.body_html || ''),
+      price: p.variants?.[0]?.price, compareAt: p.variants?.[0]?.compare_at_price,
       mainImage: p.image?.src || p.images?.[0]?.src || '',
-      imageCount: p.images?.length || 0,
-      status: p.status,
+      imageCount: p.images?.length || 0, status: p.status,
       adminUrl: `https://${CONFIG.SHOPIFY_DOMAIN}/admin/products/${p.id}`,
       publicUrl: p.handle ? `https://${CONFIG.SHOPIFY_DOMAIN.replace('.myshopify.com','.com')}/products/${p.handle}` : null,
     }));
@@ -675,25 +802,19 @@ async function getExistingProducts(shopToken) {
   }
 }
 
-// HTML-Tags entfernen + Whitespace normalisieren
 function stripHtml(html) {
   if (!html) return '';
   return html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&[a-z]+;/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Vergleicht zwei Texte (für Beschreibungen — länger als Titel)
 function calculateTextSimilarity(t1, t2) {
   if (!t1 || !t2) return 0;
   const a = t1.toLowerCase().replace(/[^a-z0-9äöüéèàç ]+/g, ' ').trim();
   const b = t2.toLowerCase().replace(/[^a-z0-9äöüéèàç ]+/g, ' ').trim();
   if (a === b) return 1.0;
-  // Wörter > 3 Chars (Stopwords filtern automatisch)
   const aWords = new Set(a.split(/\s+/).filter(w => w.length > 3));
   const bWords = new Set(b.split(/\s+/).filter(w => w.length > 3));
   if (aWords.size === 0 || bWords.size === 0) return 0;
@@ -702,41 +823,34 @@ function calculateTextSimilarity(t1, t2) {
   return union.size > 0 ? intersection.length / union.size : 0;
 }
 
-// Fuzzy-Match: wie ähnlich sind zwei Produktnamen
 function calculateSimilarity(s1, s2) {
   if (!s1 || !s2) return 0;
   const a = s1.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const b = s2.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   if (a === b) return 1.0;
-  // Wort-Überlappung
   const aWords = new Set(a.split(' ').filter(w => w.length > 2));
   const bWords = new Set(b.split(' ').filter(w => w.length > 2));
   const intersection = [...aWords].filter(w => bWords.has(w));
   const union = new Set([...aWords, ...bWords]);
   const jaccard = union.size > 0 ? intersection.length / union.size : 0;
-  // Substring-Match
-  const minLen = Math.min(a.length, b.length);
   const substringScore = (a.includes(b) || b.includes(a)) ? Math.min(a.length, b.length) / Math.max(a.length, b.length) : 0;
   return Math.max(jaccard, substringScore);
 }
 
-// Findet potenzielle Duplikate für einen neuen Kandidaten
 function findDuplicates(candidate, existingProducts, threshold = 0.6) {
   const matches = existingProducts.map(p => ({
-    ...p,
-    similarity: calculateSimilarity(candidate.name || '', p.title)
+    ...p, similarity: calculateSimilarity(candidate.name || '', p.title)
   })).filter(m => m.similarity >= threshold);
-  return matches.sort((a, b) => b.similarity - a.similarity).slice(0, 3);  // Top 3
+  return matches.sort((a, b) => b.similarity - a.similarity).slice(0, 3);
 }
 
-// ============= TREND-ANALYSE MIT FRISCHE-PRIORISIERUNG =============
+// ============= TREND-ANALYSE — Tier 1+2 NUR =============
 async function analyzeTrends(customKeywords = [], count = 15, tiktokTrends = []) {
   if (!CONFIG.CLAUDE_KEY) throw new Error('CLAUDE_KEY fehlt');
   const extra = customKeywords.length > 0
     ? `\n\nIMPORTANT: Also include trends matching these specific user keywords: ${customKeywords.join(', ')}`
     : '';
 
-  // FRISCHE-PRIORISIERUNG: erst die isNew + trendDirection: up
   const sortedTrends = [...tiktokTrends].sort((a, b) => {
     const aFresh = (a.isNew ? 2 : 0) + (a.trendDirection === 'up' ? 1 : 0);
     const bFresh = (b.isNew ? 2 : 0) + (b.trendDirection === 'up' ? 1 : 0);
@@ -744,51 +858,79 @@ async function analyzeTrends(customKeywords = [], count = 15, tiktokTrends = [])
   });
 
   const tiktokContext = sortedTrends.length > 0
-    ? `\n\nLIVE TIKTOK DATA (April 2026, real Creative Center data):\nThe following Beauty hashtags are CURRENTLY trending on TikTok. ${sortedTrends.filter(t => t.isNew).length > 0 ? 'PRIORITIZE the ones marked NEW or TRENDING UP — these are the freshest opportunities (best for early-mover advantage):' : ''}\n${sortedTrends.map((t, i) =>
-        `${i+1}. #${t.hashtag} — Rank ${t.rank}, ${t.videoCount?.toLocaleString() || '?'} videos, ${t.views?.toLocaleString() || '?'} views, change: ${t.rankChange || 0}${t.isNew ? ' [NEW]' : ''}${t.trendDirection === 'up' ? ' [UP]' : ''}${t.trendDirection === 'down' ? ' [DOWN]' : ''}`
-      ).join('\n')}\n\nIMPORTANT: Use these REAL hashtags as primary input. Match each to a product trend. Set "tiktokHashtag" field to the matching hashtag name. Set "dataSource" to "tiktok_live" for trends with TikTok backing. PRIORITIZE [NEW] and [UP] hashtags in your top picks — these have early-mover advantage.`
+    ? `\n\nLIVE TIKTOK DATA (April 2026):\n${sortedTrends.slice(0, 30).map((t, i) =>
+        `${i+1}. #${t.hashtag} — Rank ${t.rank}, ${t.videoCount?.toLocaleString() || '?'} videos${t.isNew ? ' [NEW]' : ''}${t.trendDirection === 'up' ? ' [UP]' : ''}`
+      ).join('\n')}\n\nUse these REAL hashtags as input. Match to a TIER 1+2 product (mechanical tools, textiles, accessories, wellness only — NEVER skincare formulas or electric devices). Set "tiktokHashtag" field. PRIORITIZE [NEW] and [UP] hashtags.`
     : '';
 
-  const prompt = `You are a senior beauty market intelligence analyst with access to global ecommerce data, social listening tools, sales analytics, and search-volume data for April 2026.
+  const prompt = `You are a senior beauty market analyst for ZoraSkin, a curated retailer of MECHANICAL beauty tools and accessories.
 
-Conduct a COMPREHENSIVE A-to-Z product trend analysis. Identify the TOP ${count} beauty/skincare trends RIGHT NOW that are:
-- Actively trending on TikTok, Instagram, YouTube Shorts, Amazon
-- Strong global sales (US, UK, DE, AU, CA primary markets)
-- Suitable for dropshipping (small, lightweight, profitable)
-- Price range $10-$100${extra}${tiktokContext}
+ZoraSkin's CATALOGUE STRICTLY LIMITED to Tier 1+2 product categories — no exceptions:
 
-For EACH trend, provide a complete intelligence report.
+TIER 1 — TOOLS (mechanical, no electronics, no formulas):
+- Facial Tools: gua sha boards (rose quartz, jade, amethyst, obsidian, bian stone), face rollers, ice/cryo globes, stone massagers, manual derma rollers, eyelash curlers, jade spoons
+- Body Tools: body gua sha, lymph drainage tools, dry brushes, bristle brushes, silicone cellulite cups (no vacuum motors), acupressure mats, wooden cellulite rollers, massage sticks, foot massage tools
+- Hair Tools: wooden brushes, boar bristle brushes, detangling brushes (manual), wide-tooth combs, hair clips, scrunchies (satin/silk/velvet), headbands, hair towels, silk caps, heatless curling sets
+- Eyelash & Brow: mechanical curlers, tweezers, brow brushes, brow stencils, lash combs/applicators (mechanical only)
+- Nail & Hand: cuticle pushers, nail buffers (manual), nail files (glass/crystal), manicure trays, hand massage rollers, cuticle scissors
+- Makeup Tools: brushes, beauty sponges, brush holders, cleaning mats, makeup spatulas
+
+TIER 1 — TEXTILES: silk pillowcases, satin pillowcases, sleep masks (fabric, no gel filling), hair turbans, robes, microfiber face cloths, reusable cotton pads, cleansing cloths
+
+TIER 1 — ACCESSORIES: vanity trays, makeup organizers, brush holders, cotton pad jars, q-tip jars, lipstick holders, makeup bags, travel pouches, jewelry trays
+
+TIER 1 — BATH & SPA: bath pillows, loofahs, konjac sponges, body buffers, pumice stones, foot files (manual), bath caddies, robes
+
+TIER 1 — WELLNESS: aroma stones (passive, empty), incense holders, hand grip strengtheners, stress balls, acupressure rings, baoding balls, empty rollerball bottles, empty cosmetic jars
+
+ABSOLUTELY FORBIDDEN — NEVER suggest these:
+✗ Creams, serums, lotions, oils, toners, cleansers, essences, ampoules — anything with active ingredients
+✗ Sheet masks, clay masks (with formula), bubble masks, peel-offs
+✗ Lipstick, mascara, foundation, concealer, blush, nail polish, eyeshadow — any decorative cosmetic with formula
+✗ LED masks/wands/panels, microcurrent devices, sonic brushes, ultrasonic devices, ANY electric skin device
+✗ Hair dryers, curling irons, flat irons, electric razors
+✗ Wax kits, sugaring pastes, hair removal creams
+✗ Tattoo, piercing, needles, IPL, microneedling kits with needles, derma pens
+✗ Sunscreens, self-tanners, deodorant creams
+
+Identify the TOP ${count} TIER 1+2 product trends RIGHT NOW that are:
+- Trending on TikTok, Instagram, Amazon (mechanical tools/textiles only)
+- Strong global sales — gua sha, jade rollers, silk pillowcases, dry brushes, ice globes are evergreen winners
+- Suitable for international dropshipping (small, lightweight, no batteries, no liquids)
+- Price range $10-$80${extra}${tiktokContext}
 
 Respond ONLY with valid JSON, no markdown:
 {
   "analysisDate": "April 2026",
   "totalMarketSize": "$X.X billion",
   "marketGrowthRate": "+X% YoY",
-  "topInsights": ["3 top-level insights"],
+  "topInsights": ["3 top-level insights about Tier 1+2 trends"],
   "trends": [
     {
-      "rank": 1, "name": "Product trend name", "category": "Skincare Tools",
-      "cjKeyword": "2-3 word keyword", "tiktokHashtag": "guasha",
-      "dataSource": "tiktok_live", "freshness": "new",
-      "avgPrice": 35, "priceRange": {"min": 25, "max": 55},
-      "monthlySearches": 450000, "monthlySales": 85000,
-      "salesHistory": {"month1": 62000, "month2": 71000, "month3": 85000},
-      "trendVelocity": "+37%", "trendPhase": "peak", "threeMonthTrend": "growing",
-      "trendScore": 94, "profitScore": 88,
+      "rank": 1, "name": "Specific Tier 1+2 product name", "category": "Facial Tools",
+      "cjKeyword": "2-3 word keyword (e.g. 'gua sha rose quartz')",
+      "tiktokHashtag": "guasha",
+      "dataSource": "tiktok_live", "freshness": "rising",
+      "avgPrice": 25, "priceRange": {"min": 15, "max": 45},
+      "monthlySearches": 250000, "monthlySales": 35000,
+      "salesHistory": {"month1": 28000, "month2": 31000, "month3": 35000},
+      "trendVelocity": "+25%", "trendPhase": "growing", "threeMonthTrend": "growing",
+      "trendScore": 88, "profitScore": 82,
       "relatedKeywords": ["kw1","kw2","kw3","kw4","kw5"],
       "longTailKeywords": ["phrase 1","phrase 2","phrase 3","phrase 4","phrase 5"],
       "coPurchaseItems": ["item 1","item 2","item 3"],
-      "viralPlatform": "TikTok", "viralVideos": 1250,
-      "trendReason": "1 sentence", "sentiment": "positive",
+      "viralPlatform": "TikTok", "viralVideos": 850,
+      "trendReason": "1 sentence — focus on ritual/tool nature, NOT health claims",
+      "sentiment": "positive",
       "competition": "medium", "competitorBrands": ["brand1","brand2","brand3"],
-      "entryDifficulty": "medium", "targetAudience": "Women 25-45",
+      "entryDifficulty": "low", "targetAudience": "Women 25-45",
       "demographics": {"ageRange": "25-45","gender": "85% female","topCountries": ["US","UK","DE"]},
       "seasonality": "evergreen", "bestSellingTime": "Year-round", "estimatedMargin": 72
     }
   ]
 }
 
-CRITICAL: cjKeyword 2-3 generic words. dataSource: tiktok_live or estimated. freshness: new (brand new trend) | rising (growing fast) | mature (peak/stable) | declining. trendPhase: emerging|growing|peak|declining. competition: low|medium|high. seasonality: evergreen|winter|summer|holiday. tiktokHashtag: only if matches a real hashtag (without #).`;
+CRITICAL: Every trend MUST be a Tier 1+2 mechanical product. NO ingredient-based products. NO electric devices. cjKeyword must be 2-3 generic words that CJ Dropshipping can search for. category must match one of: Facial Tools | Body Tools | Hair Tools | Eyelash & Brow | Nail & Hand | Makeup Tools | Sleep Textiles | Bath Textiles | Reusable Pads | Hair Turbans | Robes & Wraps | Storage | Brushes | Holders | Trays | Travel Pouches | Bath & Spa | Aromatherapy | Hand Strengthening | Acupressure.`;
 
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -838,7 +980,7 @@ function repairTruncatedTrendJson(text) {
   } catch(e) { return null; }
 }
 
-// ============= MARKETING-CONTENT (MULTI-LANG + EU-COMPLIANCE) =============
+// ============= MARKETING-CONTENT (entschärft, keine Heil-Claims) =============
 async function generateContent(product, options = {}) {
   const language = (options.language || 'EN').toUpperCase();
   const euCompliant = options.euCompliant === true;
@@ -848,17 +990,23 @@ async function generateContent(product, options = {}) {
     return { hook: product.trend.trendReason, usp: product.name, description: '', bullets: [] };
   }
 
-  const complianceRules = euCompliant ? `
+  // ZoraSkin ist ein Curated-Retailer — Marketing IMMER ohne Heilclaims
+  const baseRules = `
+ZoraSkin POSITIONING (always apply):
+- ZoraSkin is a curated retailer of MECHANICAL beauty tools, textiles, and accessories.
+- We sell objects, not treatments. Tools, not cures.
+- NEVER claim a product "heals", "treats", "cures", "removes wrinkles", "eliminates", "fixes".
+- ALWAYS use ritual/lifestyle language: "for daily face massage routine", "supports your skincare ritual", "designed for at-home self-care".
+- AVOID health/medical claims entirely. Avoid "anti-aging", "lifting", "tightening" as standalone benefits.
+- USE conditional/observational language: "many users find", "may help support", "designed to fit", "crafted for".
+- Focus on the OBJECT (material, craft, sensation, ritual), not on outcomes.`;
 
-EU-COMPLIANCE STRICT RULES (Cosmetics Regulation EC 1223/2009):
-- DO NOT make medical or healing claims (e.g. "cures acne", "removes wrinkles", "treats")
-- DO NOT make absolute time promises (e.g. "results in 7 days", "instant transformation")
-- DO NOT use unqualified superlatives (e.g. "best", "perfect", "miracle")
-- USE conditional/subjunctive language ("may help", "supports", "designed to")
-- DO NOT compare against competitor products by name
-- DO NOT promise guaranteed weight loss, lightening, or skin condition cures
-- Marketing must be informational, not therapeutic
-- Avoid phrases: "anti-aging" (use "for mature skin"), "whitens" (use "for radiance")` : '';
+  const complianceRules = euCompliant ? `
+EU-COMPLIANCE EXTRA RULES (Cosmetics Regulation EC 1223/2009 spirit):
+- Avoid "anti-aging" → use "for mature skin routines"
+- Avoid "whitens" / "brightens" → use "for radiance routines"
+- No before/after promises
+- No competitor comparisons by name` : '';
 
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -868,22 +1016,23 @@ EU-COMPLIANCE STRICT RULES (Cosmetics Regulation EC 1223/2009):
         model: CONFIG.CLAUDE_MODEL_COPY, max_tokens: 700,
         messages: [{
           role: 'user',
-          content: `Write compelling beauty product copy in ${langName}.
+          content: `Write compelling product copy in ${langName} for a CURATED BEAUTY TOOL retailer.
 
 Product: ${product.name}
+Category: ${product.trend.category}
 Trending context: ${product.trend.trendReason}
-Platform: ${product.trend.viralPlatform}
 Audience: ${product.trend.targetAudience}
-Keywords: ${(product.trend.relatedKeywords || []).join(', ')}
+Material/Craft notes: ${(product.trend.relatedKeywords || []).join(', ')}
 ${product.reviews?.avgScore ? `Customer rating: ${product.reviews.avgScore}/5 (${product.reviews.count} reviews)` : ''}
 ${product.shipping ? `Shipping: ${product.shipping.message}` : ''}
+${baseRules}
 ${complianceRules}
 
 Generate JSON only (no markdown):
 {
-  "hook": "emotional 10-12 word hook in ${langName}",
-  "usp": "unique benefit 15-20 words in ${langName}",
-  "description": "2-3 punchy benefit sentences in ${langName}, ${euCompliant ? 'using conditional language' : 'compelling style'}",
+  "hook": "10-12 word hook in ${langName} — ritual/tactile, no health claim",
+  "usp": "15-20 words in ${langName} — focus on craft, material, daily use",
+  "description": "2-3 sentences in ${langName} — sensory, observational, no medical promises",
   "bullets": ["benefit 1 in ${langName}","benefit 2","benefit 3","benefit 4","benefit 5"]
 }`
         }]
@@ -917,48 +1066,6 @@ async function loadShopifyCollections(shopToken, log = () => {}) {
   }
 }
 
-async function ensureSmartCollection(shopToken, categoryName, log = () => {}) {
-  if (!categoryName || categoryName.length < 2) return null;
-  const existing = await loadShopifyCollections(shopToken, log);
-  const handle = categoryName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const found = existing.find(c =>
-    c.handle === handle || c.title.toLowerCase() === categoryName.toLowerCase()
-  );
-  if (found) {
-    log(`✓ Collection "${categoryName}" existiert (ID ${found.id})`, 'sys');
-    return found;
-  }
-  // Erstellen
-  try {
-    const body = {
-      smart_collection: {
-        title: categoryName,
-        rules: [{ column: 'tag', relation: 'equals', condition: categoryName }],
-        disjunctive: false,
-        sort_order: 'best-selling',
-        published: true,
-      }
-    };
-    const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/smart_collections.json`, {
-      method: 'POST',
-      headers: { 'X-Shopify-Access-Token': shopToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    if (!r.ok) {
-      const errText = await r.text();
-      log(`Collection-Erstellung fehlgeschlagen: ${errText.slice(0,150)}`, 'warn');
-      return null;
-    }
-    const d = await r.json();
-    log(`★ Collection "${categoryName}" neu erstellt (ID ${d.smart_collection.id})`, 'ok');
-    if (collectionsCache) collectionsCache.push(d.smart_collection);
-    return d.smart_collection;
-  } catch(e) {
-    log(`Collection-Erstellung Fehler: ${e.message}`, 'warn');
-    return null;
-  }
-}
-
 // ============= SHOPIFY PUBLISH =============
 async function publishProduct(shopToken, product, content) {
   const bullets = (content.bullets || []).map(b => `<li>${b}</li>`).join('');
@@ -966,10 +1073,25 @@ async function publishProduct(shopToken, product, content) {
     ? `<p>⭐ <strong>${product.reviews.avgScore}/5</strong> · ${product.reviews.count} reviews</p>` : '';
   const ceHtml = product.hasCECertification ? '<p>🏷️ <strong>CE Certified</strong></p>' : '';
   const shippingHtml = product.shipping
-    ? `<p>${product.shipping.emoji} <strong>Versand:</strong> ${product.shipping.message}</p>` : '';
+    ? `<p>${product.shipping.emoji} <strong>Shipping:</strong> ${product.shipping.message}</p>` : '';
   const tiktokLiveHtml = product.trend.tiktokLive
-    ? `<p>📈 <strong>TikTok-verifizierter Trend:</strong> ${product.trend.tiktokLive.viewsTotal?.toLocaleString() || ''} Views, ${product.trend.tiktokLive.videoCount?.toLocaleString() || ''} Videos</p>`
+    ? `<p>📈 <strong>Trending on TikTok:</strong> ${product.trend.tiktokLive.viewsTotal?.toLocaleString() || ''} views, ${product.trend.tiktokLive.videoCount?.toLocaleString() || ''} videos</p>`
     : '';
+
+  // NEUE Tag-Logik: Sub-Tags + Hub-Tags + Verifications
+  const allTags = [
+    ...(product.subTags || []),       // z.B. ['Facial Tools']
+    ...(product.hubTags || []),       // z.B. ['Tools']
+    'ZoraSkin Curated',
+    product.hasCECertification ? 'CE Certified' : null,
+    product.isVerifiedWarehouse ? 'Verified Stock' : null,
+    product.trend.tiktokLive ? 'TikTok Live Trend' : null,
+    product.hasEUStock ? 'EU Stock' : null,
+    product.shipping?.fastest === 'EU-Lager' ? 'Fast EU Shipping' : null,
+  ].filter(Boolean);
+
+  // product_type: erste Sub-Tag oder Trend-Category
+  const productType = (product.subTags && product.subTags[0]) || product.trend.category || 'Beauty Tools';
 
   const body = {
     product: {
@@ -981,20 +1103,10 @@ ${reviewsHtml}
 ${ceHtml}
 ${shippingHtml}
 ${tiktokLiveHtml}
-<p>⭐ <strong>Trending on ${product.trend.viralPlatform}:</strong> ${product.trend.trendReason}</p>
-<p><em>↩ 30-day returns · 🔒 Secure payment</em></p>`,
+<p><em>↩ 30-day refund · 🔒 Secure payment</em></p>`,
       vendor: 'ZoraSkin',
-      product_type: product.trend.category || 'Beauty',
-      tags: [
-        product.trend.category, 'Trending 2026',
-        product.trend.viralPlatform + ' Viral', 'ZoraSkin',
-        product.hasCECertification ? 'CE Certified' : null,
-        product.isVerifiedWarehouse ? 'Verified Stock' : null,
-        product.trend.tiktokLive ? 'TikTok Live Trend' : null,
-        product.hasEUStock ? 'EU Stock' : null,
-        product.shipping?.fastest === 'EU-Lager' ? 'Fast EU Shipping' : null,
-        ...(product.trend.relatedKeywords || []).slice(0, 3)
-      ].filter(Boolean).join(','),
+      product_type: productType,
+      tags: allTags.join(','),
       status: 'active',
       variants: [{
         price: product.vk.toString(),
@@ -1022,18 +1134,20 @@ ${tiktokLiveHtml}
 
 // ============= ROUTES =============
 app.get('/', (req, res) => res.json({
-  status: 'ZoraSkin Backend v8.4 — Vollausstattung',
+  status: 'ZoraSkin Backend v8.6 — Tier 1+2 Curated Retailer',
   features: [
-    'CJ V2-API mit Elasticsearch + Multi-Strategy',
+    'CJ V2-API mit Rate-Limit-Throttle (1 req/sec)',
+    'Tier 1+2 Filter (mechanical only — keine Cremes/Seren/LED)',
+    'Auto-Tagging für Sub-Collections (Facial Tools, Hair Tools, etc.)',
+    'V1-Fallback strenger (BeautyWord + KeywordMatch + !NonBeauty)',
+    'Image-Sanity HARD-Filter',
     'TikTok Apify Integration (Discovery + Lookup)',
     'EU-Lager-Bonus (DE/FR/CZ/IT/ES/GB/NL/PL)',
-    'Versand-Zeit-Schätzung pro Produkt',
-    'Multi-Language Marketing (EN/DE/FR/IT/ES)',
-    'EU-Compliance-Modus (Cosmetics Reg. EC 1223/2009)',
-    'Frische-Trends-Priorisierung (isNew + trendUp)',
-    'Smart Collections automatisch erstellen',
+    'Multi-Language Marketing — entschärfte Copy (keine Heil-Claims)',
+    'Shop-Audit für Duplikat-Suche',
+    'Setup-Wizard v3.0 (4 Hubs + 20 Sub-Collections)',
   ],
-  endpoints: ['/api/test', '/api/categories', '/api/tiktok/test', '/api/trends/analyze', '/api/products/search', '/api/products/import', '/api/shopify/collections']
+  endpoints: ['/api/test', '/api/categories', '/api/tiktok/test', '/api/trends/analyze', '/api/products/search', '/api/products/import', '/api/audit/duplicates', '/api/shop/setup', '/setup']
 }));
 
 app.get('/api/test', async (req, res) => {
@@ -1048,6 +1162,7 @@ app.get('/api/test', async (req, res) => {
   r.claude = CONFIG.CLAUDE_KEY ? 'Key vorhanden' : 'Key fehlt';
   r.apify = CONFIG.APIFY_TOKEN ? 'Token vorhanden' : 'Token fehlt';
   r.config = {
+    backendVersion: '8.6 (Tier 1+2 Curated)',
     shopifyDomain: CONFIG.SHOPIFY_DOMAIN || 'fehlt',
     apiVersion: CONFIG.SHOPIFY_API_VERSION,
     claudeModelTrends: CONFIG.CLAUDE_MODEL_TRENDS,
@@ -1057,6 +1172,10 @@ app.get('/api/test', async (req, res) => {
     apifyLookup: CONFIG.APIFY_LOOKUP_ACTOR,
     euWarehouseCodes: EU_WAREHOUSE_CODES,
     supportedLanguages: Object.keys(SUPPORTED_LANGUAGES),
+    cjThrottleMs: CJ_MIN_GAP_MS,
+    tier1WordCount: BEAUTY_WORDS.length,
+    blockedWordCount: NON_BEAUTY.length,
+    subTagRulesCount: SUB_TAG_RULES.length,
   };
   res.json(r);
 });
@@ -1121,39 +1240,25 @@ app.get('/api/shopify/collections', async (req, res) => {
 
 app.post('/api/trends/analyze', async (req, res) => {
   const {
-    customKeywords = [],
-    count = 15,
-    useTikTok = true,
-    tiktokCountry = 'US',
-    tiktokCountries,  // Optional Array — überschreibt single country
-    tiktokPeriod = '30'
+    customKeywords = [], count = 15, useTikTok = true,
+    tiktokCountry = 'US', tiktokCountries, tiktokPeriod = '30'
   } = req.body;
   const serverLog = [];
   const L = (msg, type='sys') => { serverLog.push({msg, type}); console.log('['+type+'] '+msg); };
 
-  // Country-Liste normalisieren
   const countryList = (Array.isArray(tiktokCountries) && tiktokCountries.length > 0)
-    ? tiktokCountries
-    : [tiktokCountry];
+    ? tiktokCountries : [tiktokCountry];
 
   try {
-    L('━━━ Phase 1: Trend-Analyse ━━━', 'info');
+    L('━━━ Phase 1: Trend-Analyse (Tier 1+2 only) ━━━', 'info');
     let tiktokTrends = [];
     if (useTikTok && CONFIG.APIFY_TOKEN) {
-      L(`TikTok Discovery für ${countryList.length} Land/Länder: ${countryList.join(', ')} · ${tiktokPeriod}d`, 'info');
-
-      // Discovery PARALLEL pro Land — schneller als sequenziell
+      L(`TikTok Discovery: ${countryList.join(', ')} · ${tiktokPeriod}d`, 'info');
       const results = await Promise.all(
-        countryList.map(c => discoverTikTokTrends({
-          country: c, period: tiktokPeriod, maxResults: 30
-        }, L).catch(err => {
-          L(`Country ${c} fehlgeschlagen: ${err.message}`, 'warn');
-          return [];
-        }))
+        countryList.map(c => discoverTikTokTrends({ country: c, period: tiktokPeriod, maxResults: 30 }, L)
+          .catch(err => { L(`Country ${c} fehlgeschlagen: ${err.message}`, 'warn'); return []; }))
       );
-
-      // Merge mit Tracking welcher Hashtag in welchen Ländern auftaucht
-      const hashtagMap = new Map();  // hashtag -> { ...data, countries: [...] }
+      const hashtagMap = new Map();
       results.forEach((countryResults, idx) => {
         const country = countryList[idx];
         countryResults.forEach(t => {
@@ -1161,31 +1266,22 @@ app.post('/api/trends/analyze', async (req, res) => {
           if (hashtagMap.has(key)) {
             const existing = hashtagMap.get(key);
             existing.countries.push(country);
-            existing.crossCountryRank = (existing.crossCountryRank || 0) + (Math.max(0, 100 - (t.rank || 50)));
-            // Höchsten Wert behalten
             existing.videoCount = Math.max(existing.videoCount || 0, t.videoCount || 0);
             existing.views = Math.max(existing.views || 0, t.views || 0);
           } else {
-            hashtagMap.set(key, { ...t, countries: [country], crossCountryRank: Math.max(0, 100 - (t.rank || 50)) });
+            hashtagMap.set(key, { ...t, countries: [country] });
           }
         });
       });
-
       tiktokTrends = Array.from(hashtagMap.values()).sort((a, b) => {
-        // Cross-Country Trends zuerst, dann nach Reichweite
         if (a.countries.length !== b.countries.length) return b.countries.length - a.countries.length;
         return (b.views || 0) - (a.views || 0);
       });
-
       if (tiktokTrends.length > 0) {
-        const newOnly = tiktokTrends.filter(t => t.isNew).length;
-        const upOnly = tiktokTrends.filter(t => t.trendDirection === 'up').length;
-        const crossCountry = tiktokTrends.filter(t => t.countries.length > 1).length;
-        L(`✓ ${tiktokTrends.length} unique Hashtags · NEU: ${newOnly} · Aufsteigend: ${upOnly} · Cross-Country: ${crossCountry}`, 'ok');
-        L(`Top 5: ${tiktokTrends.slice(0,5).map(t => `#${t.hashtag}(${t.countries.join('+')})`).join(', ')}`, 'info');
+        L(`✓ ${tiktokTrends.length} unique Hashtags · NEU: ${tiktokTrends.filter(t => t.isNew).length} · UP: ${tiktokTrends.filter(t => t.trendDirection === 'up').length}`, 'ok');
       }
     }
-    L('Sonnet 4.6 strukturiert Trends...', 'info');
+    L('Sonnet 4.6 strukturiert Trends (Tier 1+2 Pflicht)...', 'info');
     const analysis = await analyzeTrends(customKeywords, count, tiktokTrends);
     L(`✓ ${(analysis.trends || []).length} Trend-Karten erstellt`, 'ok');
 
@@ -1200,21 +1296,16 @@ app.post('/api/trends/analyze', async (req, res) => {
               videoCount: match.videoCount, views: match.views,
               rankChange: match.rankChange, country: match.country,
               isNew: match.isNew, trendDirection: match.trendDirection,
-              countries: match.countries || [match.country],  // alle Länder wo der Trend lebt
+              countries: match.countries || [match.country],
               crossCountry: (match.countries || []).length > 1,
             };
             matchedCount++;
           }
         }
       });
-      L(`${matchedCount} Trends mit TikTok-Live-Daten verknüpft`, 'ok');
+      L(`${matchedCount} Trends mit TikTok-Live verknüpft`, 'ok');
     }
-    res.json({
-      success: true, ...analysis,
-      tiktokTrendsCount: tiktokTrends.length,
-      tiktokCountriesQueried: countryList,
-      serverLog
-    });
+    res.json({ success: true, ...analysis, tiktokTrendsCount: tiktokTrends.length, tiktokCountriesQueried: countryList, serverLog });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message, serverLog });
   }
@@ -1231,7 +1322,7 @@ app.post('/api/products/search', async (req, res) => {
     await loadBeautyCategoryIds(cjt, L);
     const shopToken = await getShopifyToken();
     const existingProducts = await getExistingProducts(shopToken);
-    L(`${existingProducts.length} bestehende Shopify-Produkte geladen für Duplikat-Check`, 'info');
+    L(`${existingProducts.length} bestehende Shopify-Produkte für Duplikat-Check`, 'info');
 
     let tiktokDetails = {};
     if (useTikTokLookup && CONFIG.APIFY_TOKEN) {
@@ -1251,31 +1342,24 @@ app.post('/api/products/search', async (req, res) => {
       L(`━━━ "${trend.name}" (Keyword: "${trend.cjKeyword}") ━━━`, 'info');
       if (trend.tiktokHashtag) {
         const lookup = tiktokDetails[trend.tiktokHashtag.toLowerCase()];
-        if (lookup) {
-          trend.tiktokLookup = lookup;
-          L(`  TikTok-Detail: 7d ${lookup.views7d?.toLocaleString() || '?'} views`, 'info');
-        }
+        if (lookup) trend.tiktokLookup = lookup;
       }
-
       const candidates = await findCJProductsForTrend(cjt, trend, L);
       if (!candidates.length) {
-        L(`  ✗ Keine Beauty-Produkte`, 'warn');
+        L(`  ✗ Keine Tier 1+2-Produkte gefunden`, 'warn');
         trendResults.push({ trend, candidates: [], message: 'Keine Treffer' });
         continue;
       }
 
-      // Top 5 für Stock-Check (Top 3 für UI, +2 Reserve)
       const topRaw = candidates.slice(0, 5);
-
-      // Stock parallel laden für Score-Berechnung mit EU-Bonus
-      const stockData = await Promise.all(topRaw.map(c => getCJStockByPid(cjt, c.pid)));
+      const stockData = [];
+      for (const c of topRaw) stockData.push(await getCJStockByPid(cjt, c.pid));
 
       const scored = topRaw.map((p, i) => {
         const { score, reasons } = scoreProduct(p, trend, stockData[i]);
         return { ...p, _score: score, _scoreReasons: reasons, _stock: stockData[i] };
       }).sort((a, b) => b._score - a._score);
 
-      // Optional: EU-Stock priorisieren
       if (preferEUStock) {
         scored.sort((a, b) => {
           const aEU = a._stock.some(s => EU_WAREHOUSE_CODES.includes(s.country) && s.total > 0) ? 1 : 0;
@@ -1283,26 +1367,52 @@ app.post('/api/products/search', async (req, res) => {
           if (aEU !== bEU) return bEU - aEU;
           return b._score - a._score;
         });
-        L(`  ↻ EU-Stock priorisiert`, 'sys');
       }
-
       L(`  ✓ ${scored.length} Beauty-Produkte, Top-Score: ${scored[0]._score}`, 'ok');
 
-      const top3 = scored.slice(0, 3);
-      const detailedCandidates = await Promise.all(
-        top3.map(c => prepareProductForImport(cjt, c, trend, {}, L))
-      );
+      // Top 5 sequenziell mit Details (wegen Rate-Limit + Image-Sanity Reserve)
+      const detailedCandidates = [];
+      for (const c of scored.slice(0, 5)) {
+        const detail = await prepareProductForImport(cjt, c, trend, {}, L);
+        detail._origScore = c._score;
+        detail._origScoreReasons = c._scoreReasons;
+        detailedCandidates.push(detail);
+      }
 
-      const enriched = detailedCandidates.map((d, i) => {
+      // Image-Sanity HARD-Filter
+      const sanityFiltered = detailedCandidates.filter(d => {
+        if (d.imageSanity && d.imageSanity.ok === false && !d.imageSanity.skipped) {
+          L(`  ✗ HARD-FILTER: "${(d.name || '').slice(0,50)}" — ${d.imageSanity.reason}`, 'warn');
+          return false;
+        }
+        return true;
+      });
+
+      // Auch Sub-Tag-Filter: wenn keine Sub-Tags zugewiesen → unsicher → raus
+      const subTagFiltered = sanityFiltered.filter(d => {
+        if (!d.subTags || d.subTags.length === 0) {
+          L(`  ✗ KEIN-SUBTAG: "${(d.name || '').slice(0,50)}" — passt zu keiner Sub-Kategorie`, 'warn');
+          return false;
+        }
+        return true;
+      });
+
+      L(`  Image-Sanity: ${sanityFiltered.length}/${detailedCandidates.length} · Sub-Tag: ${subTagFiltered.length}/${sanityFiltered.length}`, subTagFiltered.length > 0 ? 'ok' : 'warn');
+
+      if (subTagFiltered.length === 0) {
+        L(`  ⚠ Alle Kandidaten ausgefiltert — Trend übersprungen`, 'warn');
+        trendResults.push({ trend, candidates: [], message: 'Alle Kandidaten ausgefiltert' });
+        continue;
+      }
+
+      const finalTop = subTagFiltered.slice(0, 3);
+      const enriched = finalTop.map(d => {
         const dupes = findDuplicates(d, existingProducts, 0.6);
         const isDup = dupes.length > 0;
-        if (isDup) L(`  ⚠ DUP: "${d.name}" ähnelt ${dupes.length} bestehenden Produkten (${Math.round(dupes[0].similarity * 100)}% ${dupes[0].title})`, 'warn');
+        if (isDup) L(`  ⚠ DUP: "${d.name}" (${Math.round(dupes[0].similarity * 100)}% ${dupes[0].title})`, 'warn');
         return {
-          ...d,
-          isDuplicate: isDup,
-          duplicates: dupes,  // Liefert komplette Detail-Daten der gefundenen Duplikate
-          score: top3[i]._score,
-          scoreReasons: top3[i]._scoreReasons
+          ...d, isDuplicate: isDup, duplicates: dupes,
+          score: d._origScore || 0, scoreReasons: d._origScoreReasons || []
         };
       });
 
@@ -1310,7 +1420,8 @@ app.post('/api/products/search', async (req, res) => {
         const reviewInfo = c.reviews.avgScore ? ` · ${c.reviews.avgScore}★` : '';
         const euInfo = c.hasEUStock ? ` · EU:${c.stock.eu}` : '';
         const usInfo = c.stock.us > 0 ? ` · US:${c.stock.us}` : '';
-        L(`  ${i+1}. "${c.name}" | $${c.vk} | ${c.shipping?.businessDays}d${reviewInfo}${euInfo}${usInfo}`, 'info');
+        const tagInfo = c.subTags?.length > 0 ? ` · [${c.subTags.join(', ')}]` : '';
+        L(`  ${i+1}. "${c.name}" | $${c.vk} | ${c.shipping?.businessDays}d${reviewInfo}${euInfo}${usInfo}${tagInfo}`, 'info');
       });
 
       trendResults.push({ trend, candidates: enriched });
@@ -1325,73 +1436,53 @@ app.post('/api/products/search', async (req, res) => {
 });
 
 app.post('/api/products/import', async (req, res) => {
-  const {
-    confirmedProducts = [],
-    language = 'EN',
-    euCompliant = false,
-    autoCollections = true,
-  } = req.body;
+  const { confirmedProducts = [], language = 'EN', euCompliant = false, autoCollections = true } = req.body;
   if (!confirmedProducts.length) return res.status(400).json({ error: 'Keine Produkte bestätigt' });
   const log = [];
   const L = (msg, type='sys') => { log.push({msg, type}); console.log('['+type+'] '+msg); };
   try {
     const shopToken = await getShopifyToken();
-    L(`Shopify verbunden · Sprache: ${language}${euCompliant ? ' · EU-Compliance: AKTIV' : ''}${autoCollections ? ' · Auto-Collections: ON' : ''}`, 'ok');
-    let published = 0;
-    let skipped = 0;
-    let replaced = 0;
+    L(`Shopify verbunden · Sprache: ${language}${euCompliant ? ' · EU-Compliance' : ''}${autoCollections ? ' · Auto-Tags' : ''}`, 'ok');
+    let published = 0, skipped = 0, replaced = 0;
     const results = [];
-    const collectionsCreated = new Set();
+    const subTagsSeen = new Set();
 
     for (const product of confirmedProducts) {
-      // Duplikat-Action prüfen
-      const dupAction = product._duplicateAction; // 'skip', 'replace', 'both' oder undefined
-      const dupTargets = product._duplicateTargets || []; // Array von Shopify-IDs zum Ersetzen
-
-      if (dupAction === 'skip') {
-        L(`⏭ SKIP: ${product.name} (Duplikat, übersprungen)`, 'warn');
-        skipped++;
-        continue;
-      }
-
+      const dupAction = product._duplicateAction;
+      const dupTargets = product._duplicateTargets || [];
+      if (dupAction === 'skip') { L(`⏭ SKIP: ${product.name}`, 'warn'); skipped++; continue; }
       if (dupAction === 'replace' && dupTargets.length > 0) {
-        L(`🔄 REPLACE: ${product.name} ersetzt ${dupTargets.length} bestehende Produkte`, 'info');
+        L(`🔄 REPLACE: ${product.name}`, 'info');
         for (const targetId of dupTargets) {
           try {
             const delR = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/products/${targetId}.json`, {
-              method: 'DELETE',
-              headers: { 'X-Shopify-Access-Token': shopToken }
+              method: 'DELETE', headers: { 'X-Shopify-Access-Token': shopToken }
             });
-            if (delR.ok) {
-              L(`  ✓ Altes Produkt ${targetId} gelöscht`, 'ok');
-              replaced++;
-            } else {
-              L(`  ⚠ Löschung ${targetId} fehlgeschlagen (${delR.status})`, 'warn');
-            }
-          } catch(e) {
-            L(`  ⚠ Lösch-Fehler ${targetId}: ${e.message}`, 'warn');
-          }
+            if (delR.ok) { L(`  ✓ ${targetId} gelöscht`, 'ok'); replaced++; }
+            else L(`  ⚠ Lösch-Fehler ${targetId} (${delR.status})`, 'warn');
+          } catch(e) { L(`  ⚠ ${e.message}`, 'warn'); }
         }
       }
 
-      L(`Generiere Marketing (${language}${euCompliant ? '/EU-Compliant' : ''}): ${product.name}`, 'info');
+      // Auto-Tagging falls subTags fehlen (defensive)
+      if (!product.subTags || product.subTags.length === 0) {
+        product.subTags = assignSubcategoryTags(product.name);
+        product.hubTags = assignHubTags(product.subTags);
+      }
+
+      L(`Generiere Marketing (${language}${euCompliant ? '/EU' : ''}): ${product.name}`, 'info');
       const content = await generateContent(product, { language, euCompliant });
-      L(`Importiere: ${product.name} | ${product.images.length} Bilder | $${product.vk}`, 'info');
+      L(`Importiere: ${product.name} | ${product.images.length} Bilder | $${product.vk} | Tags: ${(product.subTags || []).join(',')}`, 'info');
 
       try {
         const shopifyProduct = await publishProduct(shopToken, product, content);
         published++;
-
-        if (autoCollections && product.trend?.category) {
-          const col = await ensureSmartCollection(shopToken, product.trend.category, L);
-          if (col) collectionsCreated.add(product.trend.category);
-        }
-
+        (product.subTags || []).forEach(t => subTagsSeen.add(t));
         results.push({
           name: product.name, shopifyId: shopifyProduct.id, shopifyHandle: shopifyProduct.handle,
           price: product.vk, compareAt: product.compareAt, margin: product.margin,
           profit: product.profit, images: product.images.length, status: 'live',
-          language, euCompliant, category: product.trend?.category,
+          language, euCompliant, subTags: product.subTags, hubTags: product.hubTags,
           duplicateAction: dupAction || 'none',
         });
         L(`✓ LIVE: ${product.name} | $${product.vk} | ${product.margin}% Marge`, 'ok');
@@ -1400,34 +1491,29 @@ app.post('/api/products/import', async (req, res) => {
       }
     }
 
-    L(`=== FERTIG: ${published} live · ${skipped} skip · ${replaced} ersetzt · ${collectionsCreated.size} Collections ===`, 'ok');
+    L(`=== FERTIG: ${published} live · ${skipped} skip · ${replaced} ersetzt · ${subTagsSeen.size} Sub-Kategorien ===`, 'ok');
+    L(`Hinweis: Smart Collections werden im Setup-Wizard angelegt — Tags wurden bereits gesetzt`, 'info');
     res.json({
-      success: true, published, skipped, replaced,
-      total: confirmedProducts.length,
+      success: true, published, skipped, replaced, total: confirmedProducts.length,
       results, log,
-      collectionsTouched: Array.from(collectionsCreated)
+      subTagsSeen: Array.from(subTagsSeen)
     });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message, log });
   }
 });
 
-// Direkter Delete-Endpoint (falls separat gebraucht)
 app.delete('/api/shopify/product/:id', async (req, res) => {
   try {
     const shopToken = await getShopifyToken();
     const r = await fetch(`https://${CONFIG.SHOPIFY_DOMAIN}/admin/api/${CONFIG.SHOPIFY_API_VERSION}/products/${req.params.id}.json`, {
-      method: 'DELETE',
-      headers: { 'X-Shopify-Access-Token': shopToken }
+      method: 'DELETE', headers: { 'X-Shopify-Access-Token': shopToken }
     });
     res.json({ success: r.ok, status: r.status });
-  } catch(e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
+  } catch(e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // ============= SHOP AUDIT: DUPLIKAT-FINDER =============
-// Vergleicht alle Shopify-Produkte gegeneinander, findet Duplikat-Paare
 app.get('/api/audit/duplicates', async (req, res) => {
   const log = [];
   const L = (msg, type='sys') => { log.push({msg, type}); console.log('['+type+'] '+msg); };
@@ -1437,77 +1523,37 @@ app.get('/api/audit/duplicates', async (req, res) => {
     L('Lade alle Shopify-Produkte...', 'info');
     const products = await getExistingProducts(shopToken);
     L(`✓ ${products.length} Produkte geladen`, 'ok');
-
     if (products.length < 2) {
-      return res.json({
-        success: true,
-        productCount: products.length,
-        duplicatePairs: [],
-        message: 'Zu wenige Produkte für Duplikat-Audit (mindestens 2 nötig)',
-        log
-      });
+      return res.json({ success: true, productCount: products.length, duplicatePairs: [],
+        message: 'Zu wenige Produkte für Audit', log });
     }
-
-    L(`Analyse: ${products.length}×${products.length-1}/2 = ${Math.round(products.length * (products.length-1) / 2)} Vergleiche`, 'info');
-    L(`Threshold: ${Math.round(threshold * 100)}% Ähnlichkeit (Name 50% + Beschreibung 50%)`, 'info');
-
+    L(`Threshold: ${Math.round(threshold * 100)}% (Name 50% + Beschreibung 50%)`, 'info');
     const pairs = [];
     for (let i = 0; i < products.length; i++) {
       for (let j = i + 1; j < products.length; j++) {
-        const a = products[i];
-        const b = products[j];
-
-        // Name-Similarity (verwendet bestehende Funktion)
+        const a = products[i], b = products[j];
         const nameSim = calculateSimilarity(a.title, b.title);
-        // Beschreibungs-Similarity
         const descSim = calculateTextSimilarity(a.bodyText || '', b.bodyText || '');
-
-        // Gewichtetes Total: 50% Name + 50% Beschreibung
-        // Falls eine Beschreibung leer: voller Name-Score
         const hasDesc = (a.bodyText || '').length > 20 && (b.bodyText || '').length > 20;
-        const total = hasDesc
-          ? (nameSim * 0.5 + descSim * 0.5)
-          : nameSim;
-
+        const total = hasDesc ? (nameSim * 0.5 + descSim * 0.5) : nameSim;
         if (total >= threshold) {
           pairs.push({
-            similarity: total,
-            nameSimilarity: nameSim,
-            descSimilarity: descSim,
-            hasDescription: hasDesc,
-            productA: {
-              id: a.id, title: a.title, mainImage: a.mainImage,
-              price: a.price, status: a.status, imageCount: a.imageCount,
-              adminUrl: a.adminUrl, publicUrl: a.publicUrl,
-              productType: a.productType, vendor: a.vendor,
-              descPreview: (a.bodyText || '').slice(0, 150)
-            },
-            productB: {
-              id: b.id, title: b.title, mainImage: b.mainImage,
-              price: b.price, status: b.status, imageCount: b.imageCount,
-              adminUrl: b.adminUrl, publicUrl: b.publicUrl,
-              productType: b.productType, vendor: b.vendor,
-              descPreview: (b.bodyText || '').slice(0, 150)
-            }
+            similarity: total, nameSimilarity: nameSim, descSimilarity: descSim, hasDescription: hasDesc,
+            productA: { id: a.id, title: a.title, mainImage: a.mainImage, price: a.price, status: a.status, imageCount: a.imageCount, adminUrl: a.adminUrl, publicUrl: a.publicUrl, productType: a.productType, vendor: a.vendor, descPreview: (a.bodyText || '').slice(0, 150) },
+            productB: { id: b.id, title: b.title, mainImage: b.mainImage, price: b.price, status: b.status, imageCount: b.imageCount, adminUrl: b.adminUrl, publicUrl: b.publicUrl, productType: b.productType, vendor: b.vendor, descPreview: (b.bodyText || '').slice(0, 150) }
           });
         }
       }
     }
-
     pairs.sort((x, y) => y.similarity - x.similarity);
-    L(`✓ ${pairs.length} Duplikat-Paare gefunden über Threshold ${Math.round(threshold * 100)}%`, pairs.length > 0 ? 'warn' : 'ok');
-
-    res.json({
-      success: true,
-      productCount: products.length,
-      duplicatePairs: pairs,
-      threshold,
-      log
-    });
+    L(`✓ ${pairs.length} Duplikat-Paare bei ${Math.round(threshold * 100)}%`, pairs.length > 0 ? 'warn' : 'ok');
+    res.json({ success: true, productCount: products.length, duplicatePairs: pairs, threshold, log });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message, log });
   }
 });
+
+console.log('[v8.6] Backend-Modul Teil 2 geladen — Setup-Block folgt');
 
 // ╔══════════════════════════════════════════════════════════════════╗
 // ║  ZORASKIN SHOP SETUP — v3.1 FINAL                                 ║
@@ -2224,4 +2270,4 @@ async function runSetup(){
 // ╚══════════════════════════════════════════════════════════════════╝
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`ZoraSkin Backend v8.4 auf Port ${PORT}`));
+app.listen(PORT, () => console.log(`ZoraSkin Backend v8.6 (Tier 1+2 Curated) auf Port ${PORT}`));
