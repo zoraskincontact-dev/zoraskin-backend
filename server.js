@@ -1748,6 +1748,98 @@ app.post('/api/shop/setup', async (req, res) => {
     });
     L('Theme-Settings (Farben, Layout) gesetzt', 'ok');
 
+    // STEP 7: Theme-Template (Homepage) patchen mit Collection-Verknüpfungen
+    // Damit "Featured Collection" und "Collection Tiles" tatsächlich Produkte zeigen
+    const indexJson = {
+      sections: {
+        "hero": {
+          type: "hero",
+          settings: {
+            text_color: "light",
+            eyebrow: "New · Spring 2026",
+            heading: "Glow, <em>defined.</em>",
+            text: "Premium tools and clean formulations engineered for visible results — without the noise.",
+            button_label: "Shop bestsellers",
+            button_url: "/collections/bestsellers",
+            button2_label: "Discover the ritual",
+            button2_url: "/pages/about"
+          }
+        },
+        "trust-bar": {
+          type: "trust-bar",
+          blocks: {
+            "shipping": { type: "item", settings: { icon: "shipping", title: "Free shipping", text: "On orders over $50, worldwide" } },
+            "returns":  { type: "item", settings: { icon: "returns",  title: "30-day returns", text: "No questions asked" } },
+            "leaf":     { type: "item", settings: { icon: "leaf",     title: "Clean formulas", text: "Cruelty-free · dermatologist-tested" } },
+            "star":     { type: "item", settings: { icon: "star",     title: "Loved by 50K+",  text: "4.9 average rating" } }
+          },
+          block_order: ["shipping","returns","leaf","star"]
+        },
+        "featured-collection": {
+          type: "featured-collection",
+          settings: {
+            collection: "bestsellers",
+            eyebrow: "Shop the edit",
+            heading: "Bestsellers",
+            text: "The pieces our community can't stop talking about.",
+            product_count: 8,
+            show_view_all: true,
+            view_all_text: "View all products"
+          }
+        },
+        "collection-tiles": {
+          type: "collection-tiles",
+          settings: { eyebrow: "Categories", heading: "Find your ritual" },
+          blocks: {
+            "tile1": { type: "tile", settings: { heading: "Skincare Tools", collection: "skincare-tools", cta: "Shop tools" } },
+            "tile2": { type: "tile", settings: { heading: "LED Therapy",    collection: "led-therapy",    cta: "Shop devices" } },
+            "tile3": { type: "tile", settings: { heading: "Daily Rituals",  collection: "daily-rituals",  cta: "Shop rituals" } }
+          },
+          block_order: ["tile1","tile2","tile3"]
+        },
+        "image-with-text": {
+          type: "image-with-text",
+          settings: {
+            flip: "false",
+            eyebrow: "Our philosophy",
+            heading: "Beauty, <em>refined.</em>",
+            text: "<p>Every product we develop starts with one question: does this actually deliver? We obsess over ingredients, materials, and craft — so you don't have to second-guess what touches your skin.</p>",
+            button_label: "Read our story",
+            button_url: "/pages/about"
+          }
+        },
+        "testimonials": {
+          type: "testimonials",
+          settings: { eyebrow: "Reviews", heading: "What customers are saying" },
+          blocks: {
+            "t1": { type: "quote", settings: { stars: 5, quote: "Two weeks in, my jawline is more defined and puffiness is gone in the mornings.", author: "Sophia M.", product: "Rose Quartz Gua Sha" } },
+            "t2": { type: "quote", settings: { stars: 5, quote: "The packaging alone made it feel luxury. The product is phenomenal — my skin has never been smoother.", author: "Léa P.", product: "Cryo Ice Globes" } },
+            "t3": { type: "quote", settings: { stars: 5, quote: "I'm a skincare obsessive and these tools have replaced three things in my routine.", author: "Aisha K.", product: "LED Therapy Wand" } }
+          },
+          block_order: ["t1","t2","t3"]
+        },
+        "newsletter": {
+          type: "newsletter",
+          settings: {
+            heading: "Join the <em>inner circle.</em>",
+            text: "Get 10% off your first order, plus exclusive routines and early drops.",
+            placeholder: "Enter your email",
+            button_label: "Subscribe"
+          }
+        }
+      },
+      order: ["hero","trust-bar","featured-collection","collection-tiles","image-with-text","testimonials","newsletter"]
+    };
+    try {
+      await setupShopifyREST(`/themes/${theme.id}/assets.json`, {
+        method: 'PUT',
+        body: JSON.stringify({ asset: { key: 'templates/index.json', value: JSON.stringify(indexJson, null, 2) } })
+      });
+      L('Homepage-Template gepatcht — Collections verknüpft', 'ok');
+    } catch(e) {
+      L(`Template-Patch Warnung: ${e.message.slice(0,150)}`, 'warn');
+    }
+
     L('=== SETUP ABGESCHLOSSEN ===', 'ok');
     res.json({
       success: true,
